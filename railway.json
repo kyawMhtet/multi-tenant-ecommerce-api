@@ -1,0 +1,11 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "buildCommand": "composer install --no-dev --optimize-autoloader"
+  },
+  "deploy": {
+    "preDeployCommand": "php artisan migrate --force",
+    "healthcheckPath": "/up",
+    "healthcheckTimeout": 300
+  }
+}
