@@ -36,6 +36,12 @@ class StoreProductVariantRequest extends FormRequest
             'current_stock' => ['sometimes', 'numeric', 'min:0'],
             'low_stock_threshold' => ['nullable', 'numeric', 'min:0'],
             'is_active' => ['sometimes', 'boolean'],
+
+            // Optional, same limits as a product's own images — most
+            // useful when this variant looks visually different (a color,
+            // a pattern) from the product's general photos.
+            'images' => ['nullable', 'array', 'max:10'],
+            'images.*' => ['image', 'max:2048'],
         ];
     }
 }

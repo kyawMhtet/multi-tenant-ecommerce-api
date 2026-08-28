@@ -45,7 +45,7 @@ class UpdateTenantRequest extends FormRequest
      */
     protected function prepareForValidation(): void
     {
-        foreach (['remove_logo', 'remove_cover'] as $flag) {
+        foreach (['remove_logo', 'remove_cover', 'allows_delivery', 'allows_pickup'] as $flag) {
             if ($this->has($flag)) {
                 $this->merge([
                     $flag => filter_var($this->input($flag), FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE),
@@ -75,6 +75,14 @@ class UpdateTenantRequest extends FormRequest
             'address' => ['sometimes', 'nullable', 'string', 'max:500'],
             'business_phone' => ['sometimes', 'nullable', 'string', 'max:32'],
             'business_email' => ['sometimes', 'nullable', 'email', 'max:255'],
+
+            // Which fulfillment options this shop offers. Partial like
+            // everything else here, which is what makes the "at least one"
+            // check in after() non-trivial: a request turning delivery off
+            // may not mention pickup at all, so the guard has to consider
+            // the SAVED value for whichever flag wasn't sent.
+            'allows_delivery' => ['sometimes', 'boolean'],
+            'allows_pickup' => ['sometimes', 'boolean'],
 
             'logo' => ['sometimes', 'image', 'max:2048'],
             'cover' => ['sometimes', 'image', 'max:2048'],
@@ -129,6 +137,27 @@ class UpdateTenantRequest extends FormRequest
     public function after(): array
     {
         return [
+            function (Validator $validator) {
+                // A shop with neither option can't take a storefront order
+                // at all — the checkout would have nothing valid to submit.
+                // Merged against what's already saved, because this is a
+                // partial update: turning delivery off is fine if pickup is
+                // already on, and only the combination is invalid.
+                $tenant = app('tenant');
+                $delivery = $this->has('allows_delivery')
+                    ? $this->boolean('allows_delivery')
+                    : (bool) $tenant->allows_delivery;
+                $pickup = $this->has('allows_pickup')
+                    ? $this->boolean('allows_pickup')
+                    : (bool) $tenant->allows_pickup;
+
+                if (! $delivery && ! $pickup) {
+                    $validator->errors()->add(
+                        'allows_delivery',
+                        'A shop must offer at least one of delivery or pickup.'
+                    );
+                }
+            },
             function (Validator $validator) {
                 foreach ((array) $this->input('business_hours', []) as $day => $intervals) {
                     if (! is_array($intervals)) {

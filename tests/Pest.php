@@ -185,3 +185,28 @@ function createOnlineOrderForTenant(\App\Models\Tenant $tenant, array $items, ar
 
     return $order;
 }
+
+/**
+ * Enables a payment method for a tenant, same bind-tenant-then-forget
+ * pattern as the other fixture helpers (TenantPaymentMethod's tenant_id is
+ * likewise filled by BelongsToTenant's creating hook, not mass-assigned).
+ *
+ * Defaults to cash on delivery because it needs no gateway, no credentials
+ * and no network: any test that just needs *a* valid payment method should
+ * use this rather than pulling Stripe into its setup.
+ */
+function enablePaymentMethodForTenant(\App\Models\Tenant $tenant, array $overrides = []): \App\Models\TenantPaymentMethod
+{
+    app()->instance('tenant', $tenant);
+
+    $method = \App\Models\TenantPaymentMethod::create(array_merge([
+        'method' => 'cod',
+        'gateway' => null,
+        'is_enabled' => true,
+        'sort_order' => 0,
+    ], $overrides));
+
+    app()->forgetInstance('tenant');
+
+    return $method;
+}

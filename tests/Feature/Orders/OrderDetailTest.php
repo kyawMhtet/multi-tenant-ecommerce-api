@@ -26,6 +26,45 @@ test('the order detail endpoint returns the full order with item names and quant
         ->assertJsonPath('data.items.0.quantity', '2.00');
 });
 
+/**
+ * variant_name is null for most order items in practice (a simple
+ * product's single variant has no name), so sku/attributes are usually the
+ * only thing identifying which item was actually sold — and like
+ * unit_price/unit_cost they're snapshotted, not looked up live, so
+ * renaming or re-SKU'ing a variant can never rewrite what a historical
+ * order appears to have contained.
+ */
+test('order items snapshot the variant sku and attributes at sale time', function () {
+    [$tenant, $user] = makeTenantUser();
+    $product = createProductForTenant($tenant, ['name' => 'Cotton T-Shirt'], [
+        'sku' => 'TSHIRT-RED-L',
+        'variant_name' => null,
+        'attributes' => ['size' => 'L', 'color' => 'Red'],
+        'selling_price' => 6000,
+        'current_stock' => 10,
+    ]);
+    $variant = $product->variants->first();
+    $token = $user->createToken('t')->plainTextToken;
+
+    $orderId = $this->withHeader('Authorization', "Bearer {$token}")
+        ->postJson('/api/v1/orders', [
+            'items' => [['product_variant_id' => $variant->id, 'quantity' => 1]],
+            'payment_method' => 'cash',
+        ])->assertCreated()->json('data.id');
+
+    // Re-SKU and rename the variant after the sale — the order must still
+    // report what was actually sold, not today's values.
+    $variant->update(['sku' => 'CHANGED-SKU', 'attributes' => ['size' => 'XXL']]);
+
+    $this->withHeader('Authorization', "Bearer {$token}")
+        ->getJson("/api/v1/orders/{$orderId}")
+        ->assertOk()
+        ->assertJsonPath('data.items.0.sku', 'TSHIRT-RED-L')
+        ->assertJsonPath('data.items.0.attributes.size', 'L')
+        ->assertJsonPath('data.items.0.attributes.color', 'Red')
+        ->assertJsonPath('data.items.0.variant_name', null);
+});
+
 test('the order detail response never exposes cost fields', function () {
     [$tenant, $user] = makeTenantUser();
     $product = createProductForTenant($tenant, variantOverrides: [

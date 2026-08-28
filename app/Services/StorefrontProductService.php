@@ -26,7 +26,7 @@ class StorefrontProductService
         $query = Product::where('is_active', true)
             ->whereHas('variants', fn ($q) => $q->where('is_active', true))
             ->with([
-                'variants' => fn ($q) => $q->where('is_active', true),
+                'variants' => fn ($q) => $q->where('is_active', true)->with('images'),
                 'images',
             ]);
 
@@ -75,7 +75,11 @@ class StorefrontProductService
             ->whereHas('product', fn ($query) => $query->withoutGlobalScope(TenantScope::class)->where('is_active', true))
             ->whereHas('tenant', fn ($query) => $query->where('is_active', true))
             ->with([
-                'product.variants' => fn ($query) => $query->withoutGlobalScope(TenantScope::class)->where('is_active', true),
+                // The nested images() bypasses TenantScope too, same
+                // reasoning as the two bypasses right below it: no tenant
+                // is bound at all yet at this point in the request.
+                'product.variants' => fn ($query) => $query->withoutGlobalScope(TenantScope::class)->where('is_active', true)
+                    ->with(['images' => fn ($imageQuery) => $imageQuery->withoutGlobalScope(TenantScope::class)]),
                 'product.images' => fn ($query) => $query->withoutGlobalScope(TenantScope::class),
                 // The product page renders the shop's header (logo, name)
                 // from this — see StorefrontProductResource's 'shop' key.

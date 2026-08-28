@@ -36,6 +36,18 @@ class UpdateProductVariantRequest extends FormRequest
             'track_stock' => ['sometimes', 'boolean'],
             'low_stock_threshold' => ['nullable', 'numeric', 'min:0'],
             'is_active' => ['sometimes', 'boolean'],
+
+            // Same append-never-replace / fold-removal-into-update
+            // convention as UpdateProductRequest, scoped to this variant's
+            // own images instead of the product's general ones.
+            'images' => ['nullable', 'array', 'max:10'],
+            'images.*' => ['image', 'max:2048'],
+            'remove_image_ids' => ['nullable', 'array'],
+            'remove_image_ids.*' => ['integer', function ($attribute, $value, $fail) {
+                if (! $this->route('variant')->images()->whereKey($value)->exists()) {
+                    $fail('One or more images to remove are invalid.');
+                }
+            }],
         ];
     }
 }

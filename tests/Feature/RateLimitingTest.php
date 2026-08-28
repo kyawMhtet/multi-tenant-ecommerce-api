@@ -46,6 +46,7 @@ test('login throttling is scoped per email, not shared across accounts from the 
 
 test('public order creation is throttled after 10 attempts per minute', function () {
     [$tenant] = makeTenantUser();
+    enablePaymentMethodForTenant($tenant);
     $product = createProductForTenant($tenant, variantOverrides: ['current_stock' => 1000]);
     $variant = $product->variants->first();
 
@@ -56,6 +57,9 @@ test('public order creation is throttled after 10 attempts per minute', function
             ],
             'customer_name' => 'Aye Aye',
             'customer_phone' => '09987654321',
+            'fulfillment_type' => 'delivery',
+            'delivery_address' => ['full_address' => 'No. 5, Yangon'],
+            'payment_method' => 'cod',
         ]);
 
     for ($i = 0; $i < 10; $i++) {

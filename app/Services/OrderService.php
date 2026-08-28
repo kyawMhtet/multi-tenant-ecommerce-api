@@ -116,7 +116,11 @@ class OrderService
             $lines = $this->resolveCartLinesBySlug($data['items']);
             $subtotal = round($lines->sum('lineTotal'), 2);
 
-            $customer = $this->findOrCreateCustomer($data['customer_name'], $data['customer_phone']);
+            $customer = $this->findOrCreateCustomer(
+                $data['customer_name'],
+                $data['customer_phone'],
+                $data['delivery_address']['full_address'] ?? null,
+            );
 
             $order = Order::create([
                 'order_number' => $this->generateOrderNumber('ONL'),
@@ -125,6 +129,20 @@ class OrderService
                 'cashier_id' => null,
                 'status' => 'pending',
                 'payment_status' => 'unpaid',
+                // Recorded even though no Payment row exists yet: before
+                // payment resolves, a cash-on-delivery order and a card
+                // order are otherwise indistinguishable (both have zero
+                // payments rows), yet one is waiting on a delivery driver
+                // and the other on a gateway webhook.
+                'payment_method' => $data['payment_method'] ?? null,
+                'fulfillment_type' => $data['fulfillment_type'] ?? 'delivery',
+                // Snapshotted, like unit_price: if the customer later moves,
+                // this order must still say where it was actually delivered.
+                // Discarded entirely for pickup so a stale address can't
+                // linger on an order nobody is delivering.
+                'delivery_address' => ($data['fulfillment_type'] ?? 'delivery') === 'delivery'
+                    ? ($data['delivery_address'] ?? null)
+                    : null,
                 'subtotal' => $subtotal,
                 'discount_amount' => 0,
                 'tax_amount' => 0,
@@ -178,8 +196,32 @@ class OrderService
                 $this->restoreStockForCancelledOrder($locked);
             }
 
-            return $locked->fresh(['items', 'customer', 'cashier']);
+            if (($data['payment_status'] ?? null) === 'paid') {
+                $this->settleManualPayments($locked);
+            }
+
+            return $locked->fresh(['items', 'customer', 'cashier', 'payments']);
         });
+    }
+
+    /**
+     * When a shop marks a manually-paid order as paid, settle the pending
+     * payment record that carries the customer's transfer screenshot —
+     * otherwise the order reads 'paid' while its own payment attempt still
+     * reads 'pending', and the shop can't tell later whether the money was
+     * ever actually reconciled.
+     *
+     * Restricted to gateway='manual'. A card payment is settled by its
+     * webhook against the real amount Stripe reports; letting a human tick
+     * a box mark it paid would let an order be marked settled for money
+     * that never arrived.
+     */
+    private function settleManualPayments(Order $order): void
+    {
+        $order->payments()
+            ->where('gateway', 'manual')
+            ->where('status', 'pending')
+            ->update(['status' => 'success', 'paid_at' => now()]);
     }
 
     private function restoreStockForCancelledOrder(Order $order): void
@@ -261,6 +303,13 @@ class OrderService
                 'product_variant_id' => $variant->id,
                 'product_name' => $variant->product->name,
                 'variant_name' => $variant->variant_name,
+                // Snapshotted for the same reason as unit_price/unit_cost
+                // below: product_variant_id is nullOnDelete, and a
+                // surviving variant can still be renamed or re-SKU'd —
+                // either would silently rewrite what a historical order
+                // appears to have contained.
+                'sku' => $variant->sku,
+                'attributes' => $variant->attributes,
                 'quantity' => $line['quantity'],
                 'unit_price' => $variant->selling_price,
                 'unit_cost' => $variant->buying_price,
@@ -278,10 +327,29 @@ class OrderService
      * different name at checkout shouldn't silently overwrite their
      * stored name.
      */
-    private function findOrCreateCustomer(string $name, string $phone): Customer
+    private function findOrCreateCustomer(string $name, string $phone, ?string $address = null): Customer
     {
-        return Customer::where('phone', $phone)->first()
-            ?? Customer::create(['name' => $name, 'phone' => $phone]);
+        $customer = Customer::where('phone', $phone)->first();
+
+        if ($customer === null) {
+            return Customer::create(['name' => $name, 'phone' => $phone, 'address' => $address]);
+        }
+
+        // Kept current so the next order can prefill it — a returning
+        // customer shouldn't retype their address every time. Only ever
+        // filled in or overwritten with a real value, never blanked: a
+        // pickup order carries no address, and letting that erase the one
+        // on file would lose it for the next delivery.
+        //
+        // Note this deliberately DOES overwrite an older address, unlike
+        // the customer's name (see below) — an address is expected to
+        // change when someone moves, whereas a differing name at checkout
+        // is more likely a one-off than a correction.
+        if ($address !== null && $address !== $customer->address) {
+            $customer->update(['address' => $address]);
+        }
+
+        return $customer;
     }
 
     /**

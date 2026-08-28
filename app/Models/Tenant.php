@@ -18,7 +18,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 #[Fillable([
     'name', 'slug', 'owner_name', 'owner_email', 'owner_phone',
     'logo_path', 'cover_path', 'address', 'business_phone', 'business_email',
-    'trial_ends_at', 'subscription_ends_at', 'currency', 'settings', 'is_active',
+    'trial_ends_at', 'subscription_ends_at', 'currency', 'stripe_account_id', 'allows_delivery', 'allows_pickup', 'settings', 'is_active',
 ])]
 class Tenant extends Model
 {
@@ -29,6 +29,8 @@ class Tenant extends Model
         return [
             'trial_ends_at' => 'datetime',
             'subscription_ends_at' => 'datetime',
+            'allows_delivery' => 'boolean',
+            'allows_pickup' => 'boolean',
             'settings' => 'array',
             'is_active' => 'boolean',
         ];
@@ -57,5 +59,10 @@ class Tenant extends Model
     public function orders(): HasMany
     {
         return $this->hasMany(Order::class);
+    }
+
+    public function paymentMethods(): HasMany
+    {
+        return $this->hasMany(TenantPaymentMethod::class);
     }
 }

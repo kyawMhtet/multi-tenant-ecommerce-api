@@ -9,7 +9,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 #[Fillable([
-    'order_id', 'product_variant_id', 'product_name', 'variant_name',
+    'order_id', 'product_variant_id', 'product_name', 'variant_name', 'sku', 'attributes',
     'quantity', 'unit_price', 'unit_cost', 'line_total',
 ])]
 class OrderItem extends Model
@@ -19,6 +19,7 @@ class OrderItem extends Model
     protected function casts(): array
     {
         return [
+            'attributes' => 'array',
             'quantity' => 'decimal:2',
             'unit_price' => 'decimal:2',
             'unit_cost' => 'decimal:2',

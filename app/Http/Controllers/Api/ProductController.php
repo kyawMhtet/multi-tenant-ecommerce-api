@@ -34,14 +34,14 @@ class ProductController extends Controller
 
     public function show(Product $product)
     {
-        return new ProductResource($product->load('variants', 'images'));
+        return new ProductResource($product->load('variants.images', 'images'));
     }
 
     public function update(UpdateProductRequest $request, Product $product)
     {
         $product = $this->productService->updateProduct($product, $request->validated());
 
-        return new ProductResource($product->load('variants', 'images'));
+        return new ProductResource($product->load('variants.images', 'images'));
     }
 
     public function destroy(Product $product)

@@ -27,7 +27,7 @@ class ProductService
      */
     public function listProducts(array $filters): \Illuminate\Contracts\Pagination\LengthAwarePaginator
     {
-        $query = Product::with('variants', 'images');
+        $query = Product::with('variants.images', 'images');
 
         if (! empty($filters['search'])) {
             $search = $filters['search'];
@@ -86,7 +86,7 @@ class ProductService
                 $this->addImages($product, $data['images']);
             }
 
-            return $product->load('variants', 'images');
+            return $product->load('variants.images', 'images');
         });
     }
 
@@ -102,7 +102,7 @@ class ProductService
     public function addVariant(Product $product, array $variantData): ProductVariant
     {
         return DB::transaction(function () use ($product, $variantData) {
-            $variant = $this->createVariantRow($product, $variantData);
+            $variant = $this->createVariantRow($product, Arr::except($variantData, ['images']));
 
             if ($variant->track_stock && $variant->current_stock > 0) {
                 StockMovement::create([
@@ -115,7 +115,15 @@ class ProductService
                 ]);
             }
 
-            return $variant;
+            // Last on purpose, same reasoning as createProduct()'s own
+            // addImages() call: addVariantImages() writes files before
+            // their DB rows and can only clean up its own partial
+            // failures, not anything that fails after it.
+            if (! empty($variantData['images'])) {
+                $this->addVariantImages($variant, $variantData['images']);
+            }
+
+            return $variant->load('images');
         });
     }
 
@@ -134,14 +142,33 @@ class ProductService
      * current_stock is never in $data — UpdateProductVariantRequest
      * doesn't validate it, so there's nothing here to strip; stock only
      * ever changes through StockService's ledgered methods.
+     *
+     * Field update, removals, and additions are one transaction, same
+     * reasoning as updateProduct(): a failure partway through must not
+     * leave the field change committed with a removal or addition only
+     * half-applied. addVariantImages() runs last for the same reason
+     * addImages() does on the product side — see that method's docblock.
      */
     public function updateVariant(Product $product, ProductVariant $variant, array $data): ProductVariant
     {
         abort_unless($variant->product_id === $product->id, 404, 'Variant not found.');
 
-        $variant->update($data);
+        return DB::transaction(function () use ($variant, $data) {
+            $variant->update(Arr::except($data, ['images', 'remove_image_ids']));
 
-        return $variant;
+            if (! empty($data['remove_image_ids'])) {
+                $variant->images()
+                    ->whereIn('id', $data['remove_image_ids'])
+                    ->get()
+                    ->each(fn (ProductImage $image) => $this->deleteVariantImage($variant, $image));
+            }
+
+            if (! empty($data['images'])) {
+                $this->addVariantImages($variant, $data['images']);
+            }
+
+            return $variant->fresh('images');
+        });
     }
 
     /**
@@ -237,6 +264,21 @@ class ProductService
     }
 
     /**
+     * Same ownership-check and deferred-file-delete reasoning as
+     * deleteImage() — see its docblock — checked against
+     * product_variant_id instead of product_id.
+     */
+    public function deleteVariantImage(ProductVariant $variant, ProductImage $image): void
+    {
+        abort_unless($image->product_variant_id === $variant->id, 404, 'Image not found.');
+
+        $path = $image->path;
+        $image->delete();
+
+        DB::afterCommit(fn () => $this->imageUploadService->delete($path));
+    }
+
+    /**
      * Stores and optimizes each file (see ImageUploadService), then
      * records it — sort_order continues from whatever images already
      * exist, so images added later always sort after earlier ones rather
@@ -277,6 +319,49 @@ class ProductService
 
                     ProductImage::create([
                         'product_id' => $product->id,
+                        'path' => $path,
+                        'sort_order' => $nextSortOrder + $index,
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                foreach ($storedPaths as $path) {
+                    $this->imageUploadService->delete($path);
+                }
+
+                throw $e;
+            }
+        });
+    }
+
+    /**
+     * Same purpose, locking, and rollback shape as addImages() — see its
+     * docblock — scoped to one variant's own images instead of the
+     * product's general ones. Kept as a separate method rather than a
+     * parameter on addImages(): the two write to different "buckets" (see
+     * Product::images() vs. ProductVariant::images()'s whereNull split),
+     * and one method juggling both would make it easier to accidentally
+     * write a variant photo into the general gallery or vice versa.
+     * product_id is still set alongside product_variant_id — an image is
+     * still "of" the product, just also scoped to one of its variants.
+     */
+    public function addVariantImages(ProductVariant $variant, array $files): void
+    {
+        DB::transaction(function () use ($variant, $files) {
+            $locked = ProductVariant::where('id', $variant->id)->lockForUpdate()->firstOrFail();
+
+            $existingMax = $locked->images()->max('sort_order');
+            $nextSortOrder = $existingMax === null ? 0 : $existingMax + 1;
+
+            $storedPaths = [];
+
+            try {
+                foreach ($files as $index => $file) {
+                    $path = $this->imageUploadService->store($file, 'products/'.$variant->tenant_id);
+                    $storedPaths[] = $path;
+
+                    ProductImage::create([
+                        'product_id' => $variant->product_id,
+                        'product_variant_id' => $variant->id,
                         'path' => $path,
                         'sort_order' => $nextSortOrder + $index,
                     ]);

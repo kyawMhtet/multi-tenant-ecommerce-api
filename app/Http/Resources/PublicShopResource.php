@@ -35,6 +35,8 @@ class PublicShopResource extends JsonResource
             'address' => $this->address,
             'business_phone' => $this->business_phone,
             'business_email' => $this->business_email,
+            'allows_delivery' => (bool) $this->allows_delivery,
+            'allows_pickup' => (bool) $this->allows_pickup,
             'business_hours' => $this->settings['business_hours'] ?? null,
             'social_links' => $this->settings['social_links'] ?? null,
         ];

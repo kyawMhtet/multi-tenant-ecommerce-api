@@ -32,8 +32,14 @@ class Product extends Model
         return $this->hasMany(ProductVariant::class);
     }
 
+    /**
+     * General images only — a photo not tied to any specific variant.
+     * Variant-specific photos (color/style shots) live on
+     * ProductVariant::images() instead; see the product_images migration
+     * for why they share one table.
+     */
     public function images(): HasMany
     {
-        return $this->hasMany(ProductImage::class)->orderBy('sort_order');
+        return $this->hasMany(ProductImage::class)->whereNull('product_variant_id')->orderBy('sort_order');
     }
 }

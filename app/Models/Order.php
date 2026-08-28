@@ -11,8 +11,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 #[Fillable([
-    'order_number', 'source', 'customer_id', 'cashier_id', 'status', 'payment_status',
-    'subtotal', 'discount_amount', 'tax_amount', 'total', 'currency', 'notes',
+    'order_number', 'source', 'fulfillment_type', 'delivery_address', 'customer_id', 'cashier_id', 'status', 'payment_status',
+    'payment_method', 'subtotal', 'discount_amount', 'tax_amount', 'total', 'currency', 'notes',
 ])]
 class Order extends Model
 {
@@ -31,6 +31,7 @@ class Order extends Model
     protected function casts(): array
     {
         return [
+            'delivery_address' => 'array',
             'subtotal' => 'decimal:2',
             'discount_amount' => 'decimal:2',
             'tax_amount' => 'decimal:2',

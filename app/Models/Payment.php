@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['order_id', 'gateway', 'amount', 'status', 'transaction_ref', 'paid_at', 'meta'])]
+#[Fillable(['order_id', 'gateway', 'amount', 'status', 'transaction_ref', 'proof_path', 'paid_at', 'meta'])]
 class Payment extends Model
 {
     use BelongsToTenant, HasFactory;

@@ -21,6 +21,11 @@ class StorefrontProductVariantResource extends JsonResource
             'unit' => $this->unit,
             'selling_price' => $this->selling_price,
             'stock_status' => $this->stockStatus(),
+            // Empty when this variant has no photos of its own — falling
+            // back to the product's general images (already on the parent
+            // response) is a frontend display choice, not something this
+            // API decides for the caller.
+            'images' => ProductImageResource::collection($this->whenLoaded('images')),
         ];
     }
 

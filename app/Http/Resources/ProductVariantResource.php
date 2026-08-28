@@ -23,6 +23,7 @@ class ProductVariantResource extends JsonResource
             'current_stock' => $this->current_stock,
             'low_stock_threshold' => $this->low_stock_threshold,
             'is_active' => $this->is_active,
+            'images' => ProductImageResource::collection($this->whenLoaded('images')),
         ];
     }
 }

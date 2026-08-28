@@ -43,6 +43,18 @@ class ProductVariant extends Model
     }
 
     /**
+     * Photos specific to this variant (e.g. this color) — separate from
+     * Product::images()'s general gallery. Optional: a variant with no
+     * photos of its own simply has an empty collection here, and the
+     * frontend decides whether to fall back to the product's general
+     * images — that's a display choice, not something baked into the API.
+     */
+    public function images(): HasMany
+    {
+        return $this->hasMany(ProductImage::class)->orderBy('sort_order');
+    }
+
+    /**
      * The single definition of "low stock" — shared by DashboardService's
      * count and the products filter, so the two can never quietly disagree
      * about what counts as low. track_stock=false variants are excluded on

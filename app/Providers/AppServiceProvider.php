@@ -6,6 +6,7 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
+use Stripe\StripeClient;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -14,7 +15,25 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
+        // One client, built from the PLATFORM's secret key. Individual
+        // shops are named per-request via the 'stripe_account' option
+        // (see StripeGateway) rather than by swapping keys, which is what
+        // Connect direct charges require — and why no per-tenant secret
+        // exists anywhere in this app.
         //
+        // Bound as a singleton so tests can swap in a fake client without
+        // reaching into StripeGateway itself.
+        // An empty api_key is rejected at construction, so when Stripe
+        // isn't configured yet the client is built keyless instead. That
+        // keeps the container resolvable — nothing should fail to boot
+        // because an optional gateway has no credentials — while any
+        // actual API call still fails loudly with Stripe's own "no API key
+        // provided". Fail at use, not at boot.
+        $this->app->singleton(StripeClient::class, function () {
+            $secret = (string) config('payments.stripe.secret');
+
+            return new StripeClient($secret !== '' ? $secret : []);
+        });
     }
 
     /**
@@ -58,6 +77,16 @@ class AppServiceProvider extends ServiceProvider
         // shop, not abusers.
         RateLimiter::for('public-shop', function (Request $request) {
             return Limit::perMinute(120)->by($request->ip());
+        });
+
+        // Payment webhooks. Generous, and per-IP only as a crude abuse
+        // brake — the real gate is the signature check inside each
+        // gateway, which rejects anything unsigned before it can do
+        // anything. Providers legitimately burst (a backlog being
+        // redelivered after an outage) from many source IPs, and throttling
+        // those into 429s just makes them retry the same events later.
+        RateLimiter::for('payment-webhooks', function (Request $request) {
+            return Limit::perMinute(300)->by($request->ip());
         });
 
         // Stricter than public-orders: this creates a whole new tenant

@@ -46,6 +46,10 @@ class ProductVariantController extends Controller
             $request->validated('note'),
         );
 
-        return new ProductVariantResource($variant);
+        // restock() never touches images, so they're never loaded by the
+        // service — loadMissing() here keeps this endpoint's response
+        // shape consistent with store()/update()'s (images always
+        // present, even if empty) without a wasted query on either side.
+        return new ProductVariantResource($variant->loadMissing('images'));
     }
 }

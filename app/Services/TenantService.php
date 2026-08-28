@@ -17,7 +17,7 @@ class TenantService
      * settings), so naming the fields costs nothing and means a future
      * loosening of validation can't reach slug, is_active or currency.
      */
-    private const PROFILE_FIELDS = ['name', 'address', 'business_phone', 'business_email'];
+    private const PROFILE_FIELDS = ['name', 'address', 'business_phone', 'business_email', 'allows_delivery', 'allows_pickup'];
 
     /**
      * Keys this service owns inside the shared settings JSON blob.

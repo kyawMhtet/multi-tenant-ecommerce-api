@@ -20,6 +20,11 @@ class OrderItemResource extends JsonResource
             'product_variant_id' => $this->product_variant_id,
             'product_name' => $this->product_name,
             'variant_name' => $this->variant_name,
+            // variant_name alone is often null (a simple product's single
+            // variant has no name), so sku/attributes are usually what
+            // actually identifies which item was sold.
+            'sku' => $this->sku,
+            'attributes' => $this->attributes,
             'quantity' => $this->quantity,
             'unit_price' => $this->unit_price,
             'line_total' => $this->line_total,

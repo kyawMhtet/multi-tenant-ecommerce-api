@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Notification;
 
 test('a successful public checkout decrements stock and creates a pending unpaid order, with no auth', function () {
     [$tenant, $user] = makeTenantUser();
+    enablePaymentMethodForTenant($tenant);
     $product = createProductForTenant($tenant, variantOverrides: ['current_stock' => 10]);
     $variant = $product->variants->first();
 
@@ -20,6 +21,9 @@ test('a successful public checkout decrements stock and creates a pending unpaid
             ],
             'customer_name' => 'Aye Aye',
             'customer_phone' => '09987654321',
+            'fulfillment_type' => 'delivery',
+            'delivery_address' => ['full_address' => 'No. 5, Yangon'],
+            'payment_method' => 'cod',
         ]);
 
     $response->assertCreated()
@@ -59,6 +63,7 @@ test('a cart line referencing another tenant product_variant_slug is rejected, n
         tenantOverrides: ['slug' => 'tenant-b', 'owner_email' => 'b@shop.test'],
     );
 
+    enablePaymentMethodForTenant($tenantA);
     $productA = createProductForTenant($tenantA, variantOverrides: ['current_stock' => 10]);
     $variantA = $productA->variants->first();
 
@@ -76,6 +81,9 @@ test('a cart line referencing another tenant product_variant_slug is rejected, n
             ],
             'customer_name' => 'Aye Aye',
             'customer_phone' => '09987654321',
+            'fulfillment_type' => 'delivery',
+            'delivery_address' => ['full_address' => 'No. 5, Yangon'],
+            'payment_method' => 'cod',
         ]);
 
     $response->assertUnprocessable()
@@ -90,6 +98,7 @@ test('a cart line referencing another tenant product_variant_slug is rejected, n
 
 test('a public checkout with no X-Tenant-Slug header is rejected', function () {
     [$tenant] = makeTenantUser();
+    enablePaymentMethodForTenant($tenant);
     $product = createProductForTenant($tenant, variantOverrides: ['current_stock' => 10]);
     $variant = $product->variants->first();
 
@@ -99,6 +108,9 @@ test('a public checkout with no X-Tenant-Slug header is rejected', function () {
         ],
         'customer_name' => 'Aye Aye',
         'customer_phone' => '09987654321',
+        'fulfillment_type' => 'delivery',
+        'delivery_address' => ['full_address' => 'No. 5, Yangon'],
+        'payment_method' => 'cod',
     ]);
 
     $response->assertNotFound();
@@ -108,6 +120,7 @@ test('a public checkout with no X-Tenant-Slug header is rejected', function () {
 
 test('a public checkout with insufficient stock is rejected and creates no order', function () {
     [$tenant] = makeTenantUser();
+    enablePaymentMethodForTenant($tenant);
     $product = createProductForTenant($tenant, variantOverrides: ['current_stock' => 1]);
     $variant = $product->variants->first();
 
@@ -120,6 +133,9 @@ test('a public checkout with insufficient stock is rejected and creates no order
             ],
             'customer_name' => 'Aye Aye',
             'customer_phone' => '09987654321',
+            'fulfillment_type' => 'delivery',
+            'delivery_address' => ['full_address' => 'No. 5, Yangon'],
+            'payment_method' => 'cod',
         ]);
 
     $response->assertUnprocessable();
@@ -136,6 +152,7 @@ test('a public checkout with insufficient stock is rejected and creates no order
 
 test('a returning customer is matched by phone instead of duplicated', function () {
     [$tenant] = makeTenantUser();
+    enablePaymentMethodForTenant($tenant);
     $product = createProductForTenant($tenant, variantOverrides: ['current_stock' => 10]);
     $variant = $product->variants->first();
 
@@ -146,6 +163,9 @@ test('a returning customer is matched by phone instead of duplicated', function 
             ],
             'customer_name' => 'Aye Aye',
             'customer_phone' => '09987654321',
+            'fulfillment_type' => 'delivery',
+            'delivery_address' => ['full_address' => 'No. 5, Yangon'],
+            'payment_method' => 'cod',
         ])->assertCreated();
 
     $checkout();
@@ -169,6 +189,7 @@ test('a phone number matching another tenant customer does not attach to them', 
     $customerB = Customer::create(['name' => 'Tenant B Regular', 'phone' => '09987654321']);
     app()->forgetInstance('tenant');
 
+    enablePaymentMethodForTenant($tenantA);
     $product = createProductForTenant($tenantA, variantOverrides: ['current_stock' => 10]);
     $variant = $product->variants->first();
 
@@ -179,6 +200,9 @@ test('a phone number matching another tenant customer does not attach to them', 
             ],
             'customer_name' => 'Someone Else',
             'customer_phone' => '09987654321',
+            'fulfillment_type' => 'delivery',
+            'delivery_address' => ['full_address' => 'No. 5, Yangon'],
+            'payment_method' => 'cod',
         ])->assertCreated();
 
     // ResolveTenant leaves 'tenant' bound to tenant A after the request
@@ -202,6 +226,7 @@ test('a public checkout only notifies its own tenant\'s users, never another ten
         tenantOverrides: ['slug' => 'tenant-b', 'owner_email' => 'b@shop.test'],
     );
 
+    enablePaymentMethodForTenant($tenantA);
     $product = createProductForTenant($tenantA, variantOverrides: ['current_stock' => 10]);
     $variant = $product->variants->first();
 
@@ -214,6 +239,9 @@ test('a public checkout only notifies its own tenant\'s users, never another ten
             ],
             'customer_name' => 'Aye Aye',
             'customer_phone' => '09987654321',
+            'fulfillment_type' => 'delivery',
+            'delivery_address' => ['full_address' => 'No. 5, Yangon'],
+            'payment_method' => 'cod',
         ])->assertCreated();
 
     Notification::assertNotSentTo($userB, NewOnlineOrderReceived::class);
@@ -221,6 +249,7 @@ test('a public checkout only notifies its own tenant\'s users, never another ten
 
 test('the public order response never exposes cost fields', function () {
     [$tenant] = makeTenantUser();
+    enablePaymentMethodForTenant($tenant);
     $product = createProductForTenant($tenant, variantOverrides: ['buying_price' => 111.11, 'current_stock' => 10]);
     $variant = $product->variants->first();
 
@@ -231,6 +260,9 @@ test('the public order response never exposes cost fields', function () {
             ],
             'customer_name' => 'Aye Aye',
             'customer_phone' => '09987654321',
+            'fulfillment_type' => 'delivery',
+            'delivery_address' => ['full_address' => 'No. 5, Yangon'],
+            'payment_method' => 'cod',
         ]);
 
     $response->assertCreated();
