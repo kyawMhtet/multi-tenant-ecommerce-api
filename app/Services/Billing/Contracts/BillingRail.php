@@ -4,6 +4,7 @@ namespace App\Services\Billing\Contracts;
 
 use App\Models\Subscription;
 use App\Services\Billing\Data\BillingEvent;
+use App\Services\Billing\Data\RailAvailability;
 use App\Services\Billing\Data\BillingInitiation;
 use Illuminate\Http\Request;
 
@@ -27,16 +28,17 @@ interface BillingRail
     public function name(): string;
 
     /**
-     * Whether this deployment can offer this rail for this plan IN THIS
-     * CURRENCY. Currency is a parameter because availability genuinely varies
-     * by it: Stripe has no MMK support at all, so card is structurally
+     * Whether this rail can be offered for this plan IN THIS CURRENCY, and
+     * if not, WHY. Currency is a parameter because availability genuinely
+     * varies by it: Stripe has no MMK support at all, so card is structurally
      * unavailable to a Myanmar shop no matter what is configured, while the
      * transfer rail is available exactly where a receiving account exists.
      *
-     * A rail offered but unconfigured is a dead end the shop only discovers
-     * after choosing it.
+     * A reason rather than a boolean, because "not set up yet" and "can never
+     * work in your currency" need different words in front of a shop owner —
+     * one is an invitation to wait, the other is not.
      */
-    public function isAvailable(string $plan, string $currency): bool;
+    public function availability(string $plan, string $currency): RailAvailability;
 
     /**
      * Begin collection. The currency is derived from the subscription's own

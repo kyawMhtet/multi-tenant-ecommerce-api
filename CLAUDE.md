@@ -31,6 +31,12 @@ sharing one catalog/inventory/order backend per tenant.
   slug exists and is active" — fine for read-only catalog access, but any write action on such a
   route (like guest checkout) needs its own explicit ownership check, not just the tenant
   middleware.
+- **Registration issues NO token — creating a shop is not signing in.** `POST /register` returns
+  the created account and nothing else; the owner then signs in at `/login` with the password
+  they just chose. This keeps `login()` the only thing that mints tokens, proves the owner knows
+  the credential rather than riding a session they never authenticated for, and is the seam email
+  verification would need if it is ever added. A client that reads `token` off the 201 will store
+  `undefined` and then 401 on everything while appearing signed in.
 - `AuthService`'s email lookup is global across all tenants and is only safe because
   `users.email` has a database-level unique constraint. If that constraint is ever relaxed to
   per-tenant-unique emails, the lookup must take a tenant identifier as an additional filter
@@ -303,6 +309,12 @@ sharing one catalog/inventory/order backend per tenant.
   was wrong for a different reason worth remembering: a shop inside Myanmar cannot easily wire
   Baht to a Thai bank (capital controls, not inconvenience), so a Baht-only bill broke the manual
   rail for exactly the shops it exists for.
+- `GET /billing` returns `rails` (usable) AND `rail_status` (every rail with a REASON:
+  `available` / `currency_unsupported` / `not_configured` / `disabled`). A bare list made two very
+  different situations look identical to a shop — "we haven't set this up yet" and "this can never
+  work in your currency" — so a Myanmar shop was invited to get in touch about a card option that
+  cannot exist. `billing.currencies.*.stripe_supported` states the provider fact; the refusal
+  message drops the word "yet" when the answer is permanent.
 - Prices, Stripe price ids AND the platform's receiving bank account are all **per currency**
   (`config('billing.currencies')`). A Stripe Price carries exactly one currency, so price ids are
   per plan AND per currency AND per mode. **MMK has no price id and never will: Stripe does not
@@ -407,6 +419,32 @@ sharing one catalog/inventory/order backend per tenant.
   The FK points at `platform_admins` and must never point at `users`.
 - `PlatformInvoiceResource` names the SHOP and is a separate class from `SubscriptionInvoiceResource`
   rather than a flag on it — two resources cannot leak into each other; one with a conditional can.
+  `PlatformShopResource` is separate from `TenantResource` for the same reason: it exposes owner
+  contact details and billing internals.
+- **`tenants.suspended_at` is NOT `is_active`, and the difference is the point.** `is_active`
+  makes `ResolveTenant` 404 on BOTH branches, taking the public storefront down and stranding
+  customers mid-order — the right hammer for fraud, far too heavy for "we need to talk to this
+  shop". Suspension is checked in `ResolveTenant`'s AUTHENTICATED branch only, so the owner is
+  locked out while the storefront keeps serving. Moving that check above the branch, or reusing
+  `is_active`, silently turns a support action into taking a shop's business offline.
+  `ShopSuspendedException` is 403 with `reason: 'shop_suspended'`, not 402 — paying doesn't fix
+  it, and the admin app renders 402 as an upgrade prompt. A reason is required, same rule as a
+  rejected transfer. The hard `is_active` switch is deliberately NOT exposed in the dashboard.
+- `PlatformShopService`'s scope discipline differs from every other cross-tenant service and is
+  easy to get wrong: `Tenant` carries no `TenantScope` (it IS the tenant), but its relations do —
+  so every eager load, `withCount` and `whereHas` strips the scope explicitly. Its `unscoped()`
+  helper accepts `Builder|Relation` because eager-load closures are handed the relation.
+- Directory filtering on `plan` matches the plan OF RECORD, not `effectivePlan()` — a scheduled
+  downgrade isn't expressible in SQL, since it's derived from two dates.
+- **Staff accounts can now be created through the API, which deliberately lowers the bar** from
+  "needs shell access" to "needs a session". `platform:create-admin` stays: it is how the first
+  account exists and the way back from a total lockout. An admin **cannot deactivate themselves**
+  — one click would otherwise lock every human out of the payment queue. Deactivation never
+  deletes: `EnsurePlatformAdmin` re-checks `is_active` per request so revocation is immediate,
+  and `subscription_invoices.reviewed_by` points here.
+- `GET /platform/billing/invoices` (ledger, all statuses, newest first) is separate from
+  `/billing/pending` (the review QUEUE, actionable first). Different questions; both live in
+  `SubscriptionReviewService` because splitting would duplicate the bypass discipline.
 - Approving or rejecting sends `SubscriptionPaymentReviewed` to the shop's users. The reason
   travels with a rejection, since a shop told only "rejected" cannot act on it.
 
@@ -488,9 +526,11 @@ sharing one catalog/inventory/order backend per tenant.
   directions of money. Deliberately one copy — a wrong entry is a silent 100x error, and two
   copies would eventually disagree with only one of them wrong.
 - **Not built yet:** plan changes on a live Stripe subscription (needs the update API plus
-  proration; cancel-then-resubscribe is the interim answer and costs the shop nothing), any
-  platform-side view beyond the payment queue, and enforcement of the `staff` limit (this app has
-  no staff-management endpoint, so nothing can create a second user yet).
+  proration; cancel-then-resubscribe is the interim answer and costs the shop nothing), platform
+  METRICS (recurring revenue must be reported PER CURRENCY — summing THB and MMK needs an FX rate
+  this app has no model for, and a wrong one silently misstates revenue), roles within platform
+  staff, and enforcement of the `staff` limit (this app has no shop-side staff-management
+  endpoint, so nothing can create a second user yet).
 
 ## Delivery / logistics
 - `delivery_providers` is a **per-tenant** table, not a platform catalogue like

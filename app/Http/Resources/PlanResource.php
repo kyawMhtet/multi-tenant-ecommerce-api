@@ -35,7 +35,12 @@ class PlanResource extends JsonResource
                 fn (PlanFeature $feature) => $feature->value,
                 PlanCatalog::PLANS[$code]['features'],
             ),
+            // Which buttons to render.
             'rails' => $this['rails'],
+            // ...and what to say about the ones that are missing. A rail the
+            // shop's currency can never support needs different words from one
+            // we simply haven't finished setting up.
+            'rail_status' => $this['rail_status'],
             'is_current' => $this['is_current'],
         ];
     }

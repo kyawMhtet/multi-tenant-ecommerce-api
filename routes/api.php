@@ -3,7 +3,9 @@
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BillingController;
 use App\Http\Controllers\Api\BillingWebhookController;
+use App\Http\Controllers\Api\Platform\PlatformAdminController;
 use App\Http\Controllers\Api\Platform\PlatformAuthController;
+use App\Http\Controllers\Api\Platform\PlatformShopController;
 use App\Http\Controllers\Api\Platform\SubscriptionReviewController;
 use App\Http\Controllers\Api\CategoryController;
 use App\Http\Controllers\Api\DashboardController;
@@ -104,11 +106,31 @@ Route::prefix('v1')->group(function () {
             Route::post('/billing/invoices/{invoice}/reject', [SubscriptionReviewController::class, 'reject'])
                 ->whereNumber('invoice');
 
+            // The full ledger, as opposed to the queue above: history to
+            // reconcile against a bank statement.
+            Route::get('/billing/invoices', [SubscriptionReviewController::class, 'invoices']);
+
             // Which currency a shop is billed in — separate from what it
             // SELLS in. Staff-only: the price ladders aren't at parity across
             // currencies, so self-service would be an arbitrage lever.
             Route::post('/subscriptions/{subscription}/billing-currency', [SubscriptionReviewController::class, 'billingCurrency'])
                 ->whereNumber('subscription');
+
+            // The shop directory. Without this nothing else on the platform
+            // side is reachable — every other endpoint takes an id.
+            Route::get('/shops', [PlatformShopController::class, 'index']);
+            Route::get('/shops/{shop}', [PlatformShopController::class, 'show'])->whereNumber('shop');
+            // Locks the OWNER out; the storefront keeps serving. The harder
+            // is_active kill switch is deliberately not exposed here.
+            Route::post('/shops/{shop}/suspend', [PlatformShopController::class, 'suspend'])->whereNumber('shop');
+            Route::post('/shops/{shop}/restore', [PlatformShopController::class, 'restore'])->whereNumber('shop');
+
+            // Staff accounts. `platform:create-admin` stays as the way the
+            // first one exists and the way back from a total lockout.
+            Route::get('/admins', [PlatformAdminController::class, 'index']);
+            Route::post('/admins', [PlatformAdminController::class, 'store']);
+            Route::post('/admins/{admin}/deactivate', [PlatformAdminController::class, 'deactivate'])->whereNumber('admin');
+            Route::post('/admins/{admin}/reactivate', [PlatformAdminController::class, 'reactivate'])->whereNumber('admin');
         });
     });
 

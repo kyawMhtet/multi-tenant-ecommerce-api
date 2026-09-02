@@ -9,6 +9,7 @@ use App\Services\Billing\BillingCurrency;
 use App\Services\Billing\PlanCatalog;
 use App\Services\Billing\Data\BillingEvent;
 use App\Services\Billing\Data\BillingInitiation;
+use App\Services\Billing\Data\RailAvailability;
 use Illuminate\Http\Request;
 
 /**
@@ -33,10 +34,18 @@ class ManualBillingRail implements BillingRail
      * account with no price is a transfer of an unknown amount a human then
      * has to guess at; a price with no account is a bill nobody can pay.
      */
-    public function isAvailable(string $plan, string $currency): bool
+    public function availability(string $plan, string $currency): RailAvailability
     {
-        return (bool) config('billing.manual_enabled')
-            && BillingCurrency::canReceiveTransfer($currency, $plan);
+        if (! config('billing.manual_enabled')) {
+            return RailAvailability::Disabled;
+        }
+
+        // Never CurrencyUnsupported: a bank transfer works in any currency we
+        // hold an account for, which is precisely why this rail is the one
+        // Myanmar shops will ever have. A missing account is on us to fix.
+        return BillingCurrency::canReceiveTransfer($currency, $plan)
+            ? RailAvailability::Available
+            : RailAvailability::NotConfigured;
     }
 
     public function initiate(Subscription $subscription, string $plan): BillingInitiation

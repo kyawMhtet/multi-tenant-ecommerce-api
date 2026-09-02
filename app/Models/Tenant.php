@@ -33,9 +33,23 @@ class Tenant extends Model
 {
     use HasFactory;
 
+    /**
+     * Locked out of its own admin by platform staff. Derived from the
+     * timestamp rather than stored as a flag, so the two can never disagree —
+     * same pattern as Order::isDispatched().
+     *
+     * Note this says nothing about the storefront, which keeps serving a
+     * suspended shop. See ResolveTenant.
+     */
+    public function isSuspended(): bool
+    {
+        return $this->suspended_at !== null;
+    }
+
     protected function casts(): array
     {
         return [
+            'suspended_at' => 'datetime',
             'allows_delivery' => 'boolean',
             'allows_pickup' => 'boolean',
             'delivery_fee' => 'decimal:2',

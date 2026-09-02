@@ -9,6 +9,7 @@ use App\Services\Billing\Contracts\BillingRail;
 use App\Services\Billing\Data\BillingEvent;
 use App\Services\Billing\Data\BillingEventType;
 use App\Services\Billing\Data\BillingInitiation;
+use App\Services\Billing\Data\RailAvailability;
 use App\Services\Payments\Exceptions\InvalidWebhookSignature;
 use App\Services\Stripe\StripeMoney;
 use Illuminate\Http\Request;
@@ -46,14 +47,25 @@ class StripeBillingRail implements BillingRail
     /**
      * A price id is per plan, per currency AND per mode: a Stripe Price
      * carries exactly one currency, and Stripe issues different ids in test
-     * and live. An unset one means this deployment cannot sell that plan by
-     * card in that currency — a normal state during setup, and a PERMANENT
-     * one for MMK, which Stripe does not support at all.
+     * and live. An unset one is a normal state during setup — distinct from
+     * MMK, where no id can exist at all.
      */
-    public function isAvailable(string $plan, string $currency): bool
+    public function availability(string $plan, string $currency): RailAvailability
     {
-        return filled(config('payments.stripe.secret'))
-            && filled(BillingCurrency::stripePriceFor($currency, $plan));
+        // Checked FIRST, because it is the answer that can never change. No
+        // amount of configuration produces a Kyat price id, so telling a
+        // Myanmar shop to "get in touch" about card would be sending them to
+        // wait for something that is not coming.
+        if (! BillingCurrency::stripeSupports($currency)) {
+            return RailAvailability::CurrencyUnsupported;
+        }
+
+        if (blank(config('payments.stripe.secret'))
+            || blank(BillingCurrency::stripePriceFor($currency, $plan))) {
+            return RailAvailability::NotConfigured;
+        }
+
+        return RailAvailability::Available;
     }
 
     public function initiate(Subscription $subscription, string $plan): BillingInitiation

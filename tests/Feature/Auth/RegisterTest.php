@@ -15,14 +15,14 @@ function registrationPayload(array $overrides = []): array
     ], $overrides);
 }
 
-test('registers a new tenant with its owner user and returns a usable token', function () {
+test('registers a new tenant with its owner user', function () {
     $response = $this->postJson('/api/v1/register', registrationPayload());
 
     $response->assertCreated()
         ->assertJsonPath('data.email', 'aung@shop.test')
         ->assertJsonPath('data.role', 'owner')
         ->assertJsonPath('data.tenant_slug', 'aung-shop')
-        ->assertJsonStructure(['data' => ['id', 'name', 'email', 'role', 'tenant_id', 'tenant_slug'], 'token']);
+        ->assertJsonStructure(['data' => ['id', 'name', 'email', 'role', 'tenant_id', 'tenant_slug']]);
 
     $tenant = Tenant::where('slug', 'aung-shop')->firstOrFail();
     $user = User::where('email', 'aung@shop.test')->firstOrFail();
@@ -31,11 +31,35 @@ test('registers a new tenant with its owner user and returns a usable token', fu
         ->and($tenant->is_active)->toBeTrue()
         ->and($user->tenant_id)->toBe($tenant->id)
         ->and($user->role)->toBe('owner');
+});
 
-    // The returned token must actually work against a tenant-scoped
-    // endpoint — proving the whole signup produced a usable session, not
-    // just DB rows.
-    $this->withHeader('Authorization', 'Bearer '.$response->json('token'))
+/**
+ * Registering is not signing in. The owner types the password they just chose
+ * at /login, which proves they know it rather than riding a session they never
+ * authenticated for — and keeps login() the only thing that mints tokens.
+ */
+test('registration does not sign the owner in', function () {
+    $response = $this->postJson('/api/v1/register', registrationPayload())->assertCreated();
+
+    expect($response->json('token'))->toBeNull()
+        // No token was minted at all, not merely withheld from the response.
+        ->and(User::where('email', 'aung@shop.test')->firstOrFail()->tokens()->count())->toBe(0);
+});
+
+/**
+ * The end-to-end assertion the old token check was really making: signing up
+ * produces an account that WORKS, not just database rows. It just goes through
+ * the front door now.
+ */
+test('the new owner can sign in with the password they chose and reach their shop', function () {
+    $this->postJson('/api/v1/register', registrationPayload())->assertCreated();
+
+    $token = $this->postJson('/api/v1/login', [
+        'email' => 'aung@shop.test',
+        'password' => 'password123',
+    ])->assertOk()->json('token');
+
+    $this->withHeader('Authorization', "Bearer {$token}")
         ->getJson('/api/v1/tenant')
         ->assertOk()
         ->assertJsonPath('data.slug', 'aung-shop');
@@ -135,9 +159,13 @@ test('a newly registered tenant starts with no data from any other tenant', func
         ['product_variant_id' => $variant->id, 'quantity' => 1],
     ]);
 
-    $token = $this->postJson('/api/v1/register', registrationPayload())
-        ->assertCreated()
-        ->json('token');
+    // Register then sign in — registration issues no token any more.
+    $this->postJson('/api/v1/register', registrationPayload())->assertCreated();
+
+    $token = $this->postJson('/api/v1/login', [
+        'email' => 'aung@shop.test',
+        'password' => 'password123',
+    ])->assertOk()->json('token');
 
     $this->withHeader('Authorization', "Bearer {$token}")
         ->getJson('/api/v1/products')

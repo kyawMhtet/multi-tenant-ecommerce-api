@@ -76,6 +76,17 @@ class BillingCurrency
     }
 
     /**
+     * Whether Stripe can process this currency at all — a fact about the
+     * provider rather than about how this deployment is configured. Absent
+     * entries default to false: a currency nobody has confirmed Stripe
+     * handles should not have card offered against it.
+     */
+    public static function stripeSupports(string $currency): bool
+    {
+        return (bool) config("billing.currencies.{$currency}.stripe_supported", false);
+    }
+
+    /**
      * The PLATFORM's own receiving account for this currency — where a shop
      * transfers its subscription fee. Not the shop's bank details, which live
      * on tenant_payment_methods and face the shop's own customers.

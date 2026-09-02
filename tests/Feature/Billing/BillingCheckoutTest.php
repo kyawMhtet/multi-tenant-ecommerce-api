@@ -449,3 +449,74 @@ test('a shop cannot declare itself paid through the subscribe endpoint', functio
         ->and($subscription->status)->toBe('active')
         ->and($subscription->current_period_ends_at->isBefore(now()->addYears(4)))->toBeTrue();
 });
+
+// ---------------------------------------------------------------------------
+// Why a rail is missing, not just that it is
+// ---------------------------------------------------------------------------
+
+/**
+ * A bare list of usable rails made two very different situations look
+ * identical: "we haven't set this up yet" and "this can never work in your
+ * currency". A Myanmar shop was being invited to get in touch about a card
+ * option that will never exist.
+ */
+test('rail_status says WHY a rail is unavailable', function () {
+    config()->set('payments.stripe.secret', 'sk_test_configured');
+    config()->set('billing.currencies.THB.plans.pro.stripe_price_id', 'price_th_pro');
+
+    [, $thbToken] = billingShop(['plan' => 'starter'], currency: 'THB');
+
+    $plans = collect($this->withHeader('Authorization', "Bearer {$thbToken}")
+        ->getJson('/api/v1/billing')->assertOk()->json('data.plans'))->keyBy('code');
+
+    expect($plans['pro']['rail_status'])->toBe(['stripe' => 'available', 'manual' => 'available'])
+        // Starter has no price id configured, so card is merely UNSET here —
+        // a different answer from Kyat below, and the distinction is the point.
+        ->and($plans['starter']['rail_status']['stripe'])->toBe('not_configured');
+});
+
+test('Stripe in Kyat is permanent, not pending', function () {
+    config()->set('payments.stripe.secret', 'sk_test_configured');
+
+    [, $token] = billingShop(['plan' => 'starter'], currency: 'MMK');
+
+    $plans = collect($this->withHeader('Authorization', "Bearer {$token}")
+        ->getJson('/api/v1/billing')->assertOk()->json('data.plans'))->keyBy('code');
+
+    expect($plans['pro']['rail_status']['stripe'])->toBe('currency_unsupported')
+        // Transfer is never "unsupported" by currency — a bank transfer works
+        // wherever we hold an account, which is why it's the rail Myanmar
+        // shops will ever have.
+        ->and($plans['pro']['rail_status']['manual'])->toBe('available')
+        ->and($plans['pro']['rails'])->toBe(['manual']);
+});
+
+/**
+ * The refusal message has to match: telling a Myanmar shop card is
+ * unavailable "yet" would have them waiting for something not coming.
+ */
+test('asking for card in Kyat is refused as permanent, not as pending setup', function () {
+    config()->set('payments.stripe.secret', 'sk_test_configured');
+
+    [, $token] = billingShop(['plan' => 'starter'], currency: 'MMK');
+
+    $message = $this->withHeader('Authorization', "Bearer {$token}")
+        ->postJson('/api/v1/billing/subscribe', ['plan' => 'pro', 'rail' => 'stripe'])
+        ->assertStatus(422)
+        ->json('message');
+
+    expect($message)->toContain('not supported in MMK')
+        ->and($message)->not->toContain('yet');
+});
+
+test('a rail with no receiving account reads as not_configured, not unsupported', function () {
+    config()->set('billing.currencies.MMK.manual.account_number', null);
+
+    [, $token] = billingShop(['plan' => 'starter'], currency: 'MMK');
+
+    $plans = collect($this->withHeader('Authorization', "Bearer {$token}")
+        ->getJson('/api/v1/billing')->assertOk()->json('data.plans'))->keyBy('code');
+
+    // Ours to fix, and the copy should say so.
+    expect($plans['pro']['rail_status']['manual'])->toBe('not_configured');
+});

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\Platform;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Platform\ApproveInvoiceRequest;
+use App\Http\Requests\Platform\IndexPlatformInvoiceRequest;
 use App\Http\Requests\Platform\RejectInvoiceRequest;
 use App\Http\Requests\Platform\SetBillingCurrencyRequest;
 use App\Http\Resources\PlatformInvoiceResource;
@@ -28,6 +29,18 @@ class SubscriptionReviewController extends Controller
     public function pending(): JsonResponse
     {
         return PlatformInvoiceResource::collection($this->review->pending())->response();
+    }
+
+    /**
+     * The full ledger, as opposed to pending() above which is the review
+     * QUEUE. Different question: history to reconcile against a bank
+     * statement, rather than work waiting to be done.
+     */
+    public function invoices(IndexPlatformInvoiceRequest $request): JsonResponse
+    {
+        return PlatformInvoiceResource::collection(
+            $this->review->invoices($request->filters(), $request->integer('per_page', 25))
+        )->response();
     }
 
     public function approve(ApproveInvoiceRequest $request, int $invoice): JsonResponse

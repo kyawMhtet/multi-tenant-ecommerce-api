@@ -61,14 +61,56 @@ test('a platform admin token never returns another shop data through a tenant ro
 });
 
 test('a shop owner token cannot reach platform routes', function () {
-    [, $user] = makeTenantUser();
+    [$tenant, $user] = makeTenantUser();
     $token = $user->createToken('t')->plainTextToken;
 
     $auth = $this->withHeader('Authorization', "Bearer {$token}");
 
-    $auth->getJson('/api/v1/platform/billing/pending')->assertForbidden();
-    $auth->getJson('/api/v1/platform/me')->assertForbidden();
-    $auth->postJson('/api/v1/platform/billing/invoices/1/approve')->assertForbidden();
+    // Every platform route, not a sample: these read and write across all
+    // tenants, so one unguarded route is the whole isolation guarantee gone.
+    foreach ([
+        '/api/v1/platform/me',
+        '/api/v1/platform/billing/pending',
+        '/api/v1/platform/billing/invoices',
+        '/api/v1/platform/shops',
+        "/api/v1/platform/shops/{$tenant->id}",
+        '/api/v1/platform/admins',
+    ] as $path) {
+        $auth->getJson($path)->assertForbidden();
+    }
+
+    foreach ([
+        '/api/v1/platform/billing/invoices/1/approve',
+        '/api/v1/platform/billing/invoices/1/reject',
+        '/api/v1/platform/subscriptions/1/billing-currency',
+        "/api/v1/platform/shops/{$tenant->id}/suspend",
+        "/api/v1/platform/shops/{$tenant->id}/restore",
+        '/api/v1/platform/admins',
+        '/api/v1/platform/admins/1/deactivate',
+    ] as $path) {
+        $auth->postJson($path, [])->assertForbidden();
+    }
+});
+
+/**
+ * A shop owner reaching the directory would read every other shop's owner
+ * contact details — the single worst leak available on this surface.
+ */
+test('a shop owner refused the directory gets no shop data at all', function () {
+    [, $user] = makeTenantUser(
+        userOverrides: ['email' => 'a@shop.test'],
+        tenantOverrides: ['slug' => 'tenant-a', 'owner_email' => 'a@shop.test'],
+    );
+    makeTenantUser(
+        userOverrides: ['email' => 'b@shop.test'],
+        tenantOverrides: ['slug' => 'tenant-b', 'owner_email' => 'b@shop.test'],
+    );
+
+    $response = $this->withHeader('Authorization', 'Bearer '.$user->createToken('t')->plainTextToken)
+        ->getJson('/api/v1/platform/shops');
+
+    $response->assertForbidden();
+    expect($response->json('data'))->toBeNull();
 });
 
 test('platform routes require authentication at all', function () {

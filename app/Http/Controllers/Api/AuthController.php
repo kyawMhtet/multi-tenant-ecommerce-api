@@ -27,12 +27,17 @@ class AuthController extends Controller
             ->response();
     }
 
+    /**
+     * Returns the created account but NO token — registering is not signing
+     * in. The client sends the owner to /login, where they enter the password
+     * they just chose.
+     *
+     * The account is still returned so the login screen can greet them by
+     * name and prefill their email rather than making them retype it.
+     */
     public function register(RegisterRequest $request): JsonResponse
     {
-        [$user, $token] = $this->authService->register($request->validated());
-
-        return (new UserResource($user))
-            ->additional(['token' => $token])
+        return (new UserResource($this->authService->register($request->validated())))
             ->response()
             ->setStatusCode(Response::HTTP_CREATED);
     }

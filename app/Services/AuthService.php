@@ -37,9 +37,13 @@ class AuthService
      * BelongsToTenant's hook: no tenant is bound yet, since it's what's being
      * created.
      *
-     * @return array{0: User, 1: string}
+     * Deliberately issues NO token: registering is not signing in. The owner
+     * types their password once more at /login, which proves they know the
+     * credential they just chose rather than riding a session they never
+     * authenticated for — and leaves one place, login(), that mints tokens.
+     * It is also the seam email verification would need if it is ever added.
      */
-    public function register(array $data): array
+    public function register(array $data): User
     {
         return DB::transaction(function () use ($data) {
             $tenant = Tenant::create([
@@ -70,9 +74,7 @@ class AuthService
             // would be a shop that can neither write nor be billed.
             $this->subscriptions->startTrial($tenant);
 
-            $token = $user->createToken('api-token')->plainTextToken;
-
-            return [$user, $token];
+            return $user;
         });
     }
 

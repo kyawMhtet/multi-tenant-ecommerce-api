@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\Exceptions\ShopSuspendedException;
 use App\Models\Tenant;
 use App\Models\User;
 use Closure;
@@ -35,6 +36,17 @@ class ResolveTenant
 
             abort_if($tenant === null || ! $tenant->is_active, 404, 'Tenant not found.');
 
+            // Checked HERE and nowhere else, and that asymmetry is the whole
+            // point of suspension existing separately from is_active: the shop
+            // owner is locked out of their admin while the storefront branch
+            // below keeps serving customers, who did nothing wrong and are
+            // holding links that must not break. Moving this check above the
+            // branch, or reusing is_active, would silently turn a support
+            // action into taking a shop's business offline.
+            if ($tenant->isSuspended()) {
+                throw ShopSuspendedException::for($tenant);
+            }
+
             app()->instance('tenant', $tenant);
 
             return $next($request);
@@ -42,6 +54,8 @@ class ResolveTenant
 
         // Unauthenticated storefront routes: no identity to derive from, so the
         // header is the only source. The one case where it's read.
+        //
+        // Deliberately does NOT consider suspension — see above.
         $slug = $request->header('X-Tenant-Slug');
 
         $tenant = $slug

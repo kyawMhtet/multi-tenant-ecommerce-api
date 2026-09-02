@@ -80,6 +80,12 @@ return [
     'currencies' => [
 
         'THB' => [
+            // Whether STRIPE can process this currency at all — a fact about
+            // the provider, not about this deployment's setup. It is what
+            // lets the API tell a shop "card will never work in Kyat" rather
+            // than "not set up yet, get in touch", which would be an
+            // invitation to wait for something that is never coming.
+            'stripe_supported' => true,
             'plans' => [
                 'starter' => [
                     'amount' => (float) env('BILLING_THB_STARTER_AMOUNT', 300),
@@ -99,6 +105,8 @@ return [
         ],
 
         'MMK' => [
+            // Stripe has no MMK support. Permanent, not pending.
+            'stripe_supported' => false,
             'plans' => [
                 'starter' => [
                     'amount' => (float) env('BILLING_MMK_STARTER_AMOUNT', 30000),

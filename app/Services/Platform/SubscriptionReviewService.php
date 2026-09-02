@@ -11,6 +11,7 @@ use App\Services\Billing\PlanCatalog;
 use App\Models\SubscriptionInvoice;
 use App\Notifications\SubscriptionPaymentReviewed;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
 
@@ -51,6 +52,36 @@ class SubscriptionReviewService
             ->orderByRaw('proof_path is null')
             ->orderBy('created_at')
             ->paginate($perPage);
+    }
+
+    /**
+     * The full invoice ledger across every shop — the month-end
+     * reconciliation view, and where "which payment do you mean" gets
+     * answered.
+     *
+     * Deliberately separate from pending(): that one is the review QUEUE, with
+     * its own filter and its own ordering (actionable first). This one is
+     * history, newest first, and shows paid and void rows too. Same table and
+     * the same cross-tenant rules, so it lives here rather than in a second
+     * service that would have to repeat the bypass discipline.
+     *
+     * @param  array<string, mixed>  $filters
+     */
+    public function invoices(array $filters = [], int $perPage = 25): LengthAwarePaginator
+    {
+        return SubscriptionInvoice::withoutGlobalScope(TenantScope::class)
+            ->with('tenant')
+            ->when(Arr::get($filters, 'status'), fn ($q, $v) => $q->where('status', $v))
+            ->when(Arr::get($filters, 'rail'), fn ($q, $v) => $q->where('gateway', $v))
+            ->when(Arr::get($filters, 'currency'), fn ($q, $v) => $q->where('currency', strtoupper($v)))
+            ->when(Arr::get($filters, 'tenant_id'), fn ($q, $v) => $q->where('tenant_id', $v))
+            // Inclusive of the whole `to` day: a reviewer entering a month end
+            // means "up to and including", not "up to midnight that morning".
+            ->when(Arr::get($filters, 'from'), fn ($q, $v) => $q->whereDate('created_at', '>=', $v))
+            ->when(Arr::get($filters, 'to'), fn ($q, $v) => $q->whereDate('created_at', '<=', $v))
+            ->latest('id')
+            ->paginate($perPage)
+            ->withQueryString();
     }
 
     /**

@@ -55,6 +55,9 @@ class BillingController extends Controller
             'code' => $code,
             'currency' => $currency,
             'rails' => $this->rails->availableFor($code, $currency),
+            'rail_status' => collect($this->rails->statusFor($code, $currency))
+                ->map(fn ($availability) => $availability->value)
+                ->all(),
             'is_current' => $subscription !== null && $code === $subscription->effectivePlan(),
         ]);
 

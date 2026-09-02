@@ -8,6 +8,7 @@ use App\Models\SubscriptionInvoice;
 use App\Models\Tenant;
 use App\Notifications\SubscriptionCancelled;
 use App\Services\Billing\Data\BillingInitiation;
+use App\Services\Billing\Data\RailAvailability;
 use App\Services\ImageUploadService;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -76,9 +77,15 @@ class SubscriptionService
         $railInstance = $this->rails->rail($rail);
         $currency = BillingCurrency::for($subscription);
 
-        if (! $railInstance->isAvailable($plan, $currency)) {
+        $availability = $railInstance->availability($plan, $currency);
+
+        if (! $availability->isAvailable()) {
+            // The word "yet" is wrong when the answer is permanent, and a shop
+            // owner reading it would wait for something that is not coming.
             throw new BillingActionUnavailableException(
-                "That payment option is not available for this plan in {$currency} yet."
+                $availability === RailAvailability::CurrencyUnsupported
+                    ? "Card payment is not supported in {$currency}. Bank transfer is the way to pay from here."
+                    : "That payment option is not available for this plan in {$currency} yet."
             );
         }
 
