@@ -7,12 +7,9 @@ use Illuminate\Bus\Queueable;
 use Illuminate\Notifications\Notification;
 
 /**
- * Deliberately not ShouldQueue: no queue worker runs in this app today, so
- * a queued notification would silently sit in the jobs table forever — a
- * broken feature that still looks like it works (the order still gets
- * created). Sent synchronously via Notification::send() instead. Adding
- * ShouldQueue later is a one-line change once a worker is guaranteed
- * running, with no call-site changes required.
+ * Deliberately NOT ShouldQueue: no worker runs today, so a queued notification
+ * would sit in the jobs table forever — broken while still looking like it
+ * works. Adding ShouldQueue later is a one-line change.
  */
 class NewOnlineOrderReceived extends Notification
 {
@@ -25,10 +22,7 @@ class NewOnlineOrderReceived extends Notification
         return ['database'];
     }
 
-    /**
-     * A readable, stable discriminator stored directly in the `type`
-     * column — the default would be this class's full name instead.
-     */
+    /** A stable discriminator in `type`; the default would be the FQCN. */
     public function databaseType(object $notifiable): string
     {
         return 'new_online_order';

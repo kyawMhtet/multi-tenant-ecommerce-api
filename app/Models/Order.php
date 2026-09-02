@@ -12,31 +12,135 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 
 #[Fillable([
     'order_number', 'source', 'fulfillment_type', 'delivery_address', 'customer_id', 'cashier_id', 'status', 'payment_status',
-    'payment_method', 'subtotal', 'discount_amount', 'tax_amount', 'total', 'currency', 'notes',
+    'delivery_provider_id', 'delivery_provider_name', 'tracking_number', 'dispatched_at', 'dispatched_by',
+    'payment_method', 'cancellation_reason', 'cancellation_note', 'cancelled_at', 'cancelled_by',
+    'refunded_at', 'refund_note', 'refunded_by',
+    'subtotal', 'discount_amount', 'tax_amount', 'delivery_fee', 'total', 'currency', 'notes',
 ])]
 class Order extends Model
 {
     use BelongsToTenant, HasFactory, SoftDeletes;
 
     /**
-     * The one definition of "counts as a real sale" — shared by
-     * DashboardService's today card and ReportService's date-range report,
-     * so the two can never quietly disagree about what a given day's
-     * revenue is. Deliberately checks status only, not payment_status: a
-     * status=paid order still counts in full even if payment_status is
-     * 'partial'.
+     * The one definition of "counts as a real sale", shared by DashboardService
+     * and ReportService so the two can't disagree about a day's revenue.
+     * Status only, not payment_status: a paid order counts in full even when
+     * payment_status is 'partial'.
      */
     public const REVENUE_STATUSES = ['paid', 'completed'];
+
+    /**
+     * Sales revenue in SQL, for aggregates. The delivery fee is excluded: it's
+     * mostly money handed to a courier, and nothing records what the courier
+     * was paid — counting it as revenue while only goods appear in cost
+     * overstates margin on every delivered order. It's still reported
+     * separately, never hidden.
+     *
+     * `total - delivery_fee` rather than `subtotal`, which predates discounts
+     * and tax and would stop being correct once those are real.
+     */
+    public const GOODS_REVENUE_SQL = 'total - delivery_fee';
 
     protected function casts(): array
     {
         return [
             'delivery_address' => 'array',
+            'dispatched_at' => 'datetime',
+            'cancelled_at' => 'datetime',
+            'refunded_at' => 'datetime',
             'subtotal' => 'decimal:2',
             'discount_amount' => 'decimal:2',
             'tax_amount' => 'decimal:2',
+            'delivery_fee' => 'decimal:2',
             'total' => 'decimal:2',
         ];
+    }
+
+    /**
+     * Whether the shop still owes this customer their money back. Derived, so
+     * it can't disagree with the facts underneath.
+     *
+     * For manual methods a refund is something we RECORD but never PERFORM, so
+     * "cancelled but not yet refunded" is a real state a shop sits in for days
+     * — it has to be visible rather than left to memory.
+     */
+    public function refundRequired(): bool
+    {
+        return $this->status === 'cancelled'
+            && $this->payment_status === 'paid'
+            && $this->refunded_at === null;
+    }
+
+    /**
+     * Whether any line is waiting on stock the shop doesn't have. Derived from
+     * the rows, so mixed carts need no special case.
+     *
+     * A preorder order sits at 'pending' for weeks — without this the shop
+     * can't tell it from one nobody has got round to.
+     *
+     * Resolves cheapest-first (withCount alias, loaded collection, then a
+     * query) so it's safe to call from a paginated list.
+     */
+    public function hasPreorderItems(): bool
+    {
+        if ($this->preorder_item_count !== null) {
+            return (int) $this->preorder_item_count > 0;
+        }
+
+        if ($this->relationLoaded('items')) {
+            return $this->items->contains(fn (OrderItem $item) => (bool) $item->is_preorder);
+        }
+
+        return $this->items()->where('is_preorder', true)->exists();
+    }
+
+    /**
+     * When the whole order can ship: the LONGEST lead time across its preorder
+     * lines, since one parcel can only leave once everything has landed.
+     *
+     * Measured from created_at, not today — counting from now would push the
+     * estimate back a day every day, so the promise could never come due.
+     * Null when no lead time was quoted; inventing a date is worse than none.
+     */
+    public function preorderReadyBy(): ?\Illuminate\Support\Carbon
+    {
+        $days = $this->items
+            ->filter(fn (OrderItem $item) => $item->is_preorder)
+            ->pluck('preorder_lead_time_days')
+            ->filter()
+            ->max();
+
+        return $days ? $this->created_at?->copy()->addDays((int) $days) : null;
+    }
+
+    /**
+     * Dispatch and commercial status are different axes: a COD order is
+     * dispatched while still unpaid, and a pickup order completes without ever
+     * being dispatched. Derived, so the fact isn't stored twice.
+     */
+    public function isDispatched(): bool
+    {
+        return $this->dispatched_at !== null;
+    }
+
+    public function deliveryProvider(): BelongsTo
+    {
+        return $this->belongsTo(DeliveryProvider::class);
+    }
+
+    public function dispatchedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'dispatched_by');
+    }
+
+    public function cancelledBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'cancelled_by');
+    }
+
+    public function refundedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'refunded_by');
     }
 
     public function customer(): BelongsTo

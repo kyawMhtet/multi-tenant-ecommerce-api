@@ -1,8 +1,10 @@
 *.log
 .DS_Store
-.env
-.env.backup
-.env.production
+# Every dotenv variant, including ad-hoc ones like .env.backup-2026-09-01.
+# The previous list named three specific files, which meant an improvised
+# backup holding real secrets was tracked by default.
+.env*
+!.env.example
 .phpactor.json
 .phpunit.result.cache
 /.codex

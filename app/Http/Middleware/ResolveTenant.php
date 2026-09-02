@@ -3,6 +3,7 @@
 namespace App\Http\Middleware;
 
 use App\Models\Tenant;
+use App\Models\User;
 use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -11,15 +12,26 @@ class ResolveTenant
 {
     public function handle(Request $request, Closure $next): Response
     {
-        // Authenticated: the tenant is derived from the token owner
-        // directly, never from the header. X-Tenant-Slug is not read at
-        // all on this path — not "trust it, then verify it matches,"
-        // since that still means a bug in the verification step (or a
-        // future refactor that forgets it) would bind an attacker-chosen
-        // tenant. Deriving it makes the header simply irrelevant for
-        // every authenticated request, not merely rejected when wrong.
-        if ($request->user()) {
-            $tenant = $request->user()->tenant;
+        // Derived from the token owner, never the header. X-Tenant-Slug isn't
+        // read at all here — not "trust then verify", since a bug in the verify
+        // step would bind an attacker-chosen tenant. Deriving makes the header
+        // irrelevant rather than merely rejected when wrong.
+        if ($user = $request->user()) {
+            // The tenant-side door, and the counterpart to
+            // EnsurePlatformAdmin. Sanctum tokens are polymorphic and its
+            // guard authenticates whatever model a token points at, ignoring
+            // the configured provider — so a PLATFORM ADMIN's token satisfies
+            // auth:sanctum on these routes too.
+            //
+            // Letting one through would be worse than a 500 on the missing
+            // ->tenant relation: TenantScope::currentTenantId() would read a
+            // null tenant_id, the global scope would add no WHERE clause at
+            // all, and the request would run unscoped across every tenant.
+            // Rejecting by TYPE closes that off structurally rather than
+            // relying on the tenant lookup below to fail.
+            abort_unless($user instanceof User, 403, 'This account cannot access shop data.');
+
+            $tenant = $user->tenant;
 
             abort_if($tenant === null || ! $tenant->is_active, 404, 'Tenant not found.');
 
@@ -28,9 +40,8 @@ class ResolveTenant
             return $next($request);
         }
 
-        // Unauthenticated (public storefront routes): there is no
-        // authoritative identity to derive a tenant from, so the header
-        // is the only source — this is the one case where it's read.
+        // Unauthenticated storefront routes: no identity to derive from, so the
+        // header is the only source. The one case where it's read.
         $slug = $request->header('X-Tenant-Slug');
 
         $tenant = $slug

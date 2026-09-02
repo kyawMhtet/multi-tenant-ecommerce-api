@@ -7,8 +7,6 @@ use Illuminate\Support\Facades\Schema;
 return new class extends Migration
 {
     /**
-     * Run the migrations.
-     *
      * Replaces products.image_path with a proper one-to-many table: a
      * single nullable string column can't hold a gallery. `path` is
      * storage-relative (the 'public' disk), never a raw client-supplied
@@ -22,25 +20,17 @@ return new class extends Migration
             $table->id();
             $table->foreignId('tenant_id')->constrained()->cascadeOnDelete();
             $table->foreignId('product_id')->constrained()->cascadeOnDelete();
+            // Optional: an image may belong to one specific variant (a
+            // colour) rather than the product's general gallery.
+            $table->foreignId('product_variant_id')->nullable()->constrained()->cascadeOnDelete();
             $table->string('path');
             $table->unsignedSmallInteger('sort_order')->default(0);
             $table->timestamps();
         });
-
-        Schema::table('products', function (Blueprint $table) {
-            $table->dropColumn('image_path');
-        });
     }
 
-    /**
-     * Reverse the migrations.
-     */
     public function down(): void
     {
-        Schema::table('products', function (Blueprint $table) {
-            $table->string('image_path')->nullable()->after('description');
-        });
-
         Schema::dropIfExists('product_images');
     }
 };

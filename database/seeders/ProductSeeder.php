@@ -11,17 +11,9 @@ use Illuminate\Support\Str;
 class ProductSeeder extends Seeder
 {
     /**
-     * Attaches sample catalog data to the tenant TenantSeeder already
-     * created — looked up by its known slug rather than created here,
-     * since this seeder must never create its own tenant (that would
-     * defeat the point of having one predictable test tenant to log into).
-     *
-     * Goes through ProductService/Category::create() rather than raw
-     * inserts, on purpose: that's the only way to get a correctly
-     * generated variant slug, a real stock_movements ledger row for
-     * starting stock, and tenant_id auto-filled the same way a real
-     * request would produce it — seeded data that took a shortcut around
-     * the app's own invariants wouldn't be a realistic stand-in for it.
+     * Goes through ProductService rather than raw inserts: that's the only way
+     * to get a real variant slug, a stock_movements ledger row for starting
+     * stock, and tenant_id auto-filled the way a real request would.
      */
     public function run(): void
     {
@@ -44,11 +36,8 @@ class ProductSeeder extends Seeder
                 'name' => $product['name'],
                 'description' => $product['description'],
                 'category_id' => $product['category_id'],
-                // No demo image files to seed — product_images now
-                // requires a real, already-optimized stored file
-                // (ImageUploadService), and there's nothing to fake that
-                // wouldn't imply a working image that doesn't exist.
-                // Seeded products simply have zero images.
+                // No demo images: product_images requires a real stored file,
+                // and faking one would imply an image that doesn't exist.
                 'is_active' => true,
                 'variant' => $product['variants'][0],
             ]);
@@ -70,9 +59,7 @@ class ProductSeeder extends Seeder
     private function products(\Illuminate\Support\Collection $categories): array
     {
         return [
-            // Simple products (one variant each), a healthy mix of stock
-            // levels including the low-stock and out-of-stock edge cases
-            // the task specifically asked for.
+            // Simple products, with low-stock and out-of-stock edge cases.
             [
                 'name' => 'Milo Chocolate Malt Drink 400g',
                 'description' => 'Chocolate malt drink powder, 400g tin.',

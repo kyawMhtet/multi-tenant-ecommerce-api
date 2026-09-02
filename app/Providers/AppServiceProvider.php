@@ -4,31 +4,19 @@ namespace App\Providers;
 
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Stripe\StripeClient;
 
 class AppServiceProvider extends ServiceProvider
 {
-    /**
-     * Register any application services.
-     */
     public function register(): void
     {
-        // One client, built from the PLATFORM's secret key. Individual
-        // shops are named per-request via the 'stripe_account' option
-        // (see StripeGateway) rather than by swapping keys, which is what
-        // Connect direct charges require — and why no per-tenant secret
-        // exists anywhere in this app.
-        //
-        // Bound as a singleton so tests can swap in a fake client without
-        // reaching into StripeGateway itself.
-        // An empty api_key is rejected at construction, so when Stripe
-        // isn't configured yet the client is built keyless instead. That
-        // keeps the container resolvable — nothing should fail to boot
-        // because an optional gateway has no credentials — while any
-        // actual API call still fails loudly with Stripe's own "no API key
-        // provided". Fail at use, not at boot.
+        // One client on the PLATFORM's key; shops are named per-request via
+        // 'stripe_account' (see StripeGateway), which is why no per-tenant
+        // secret exists anywhere. Built keyless when unconfigured so the app
+        // still boots — an optional gateway should fail at use, not at boot.
         $this->app->singleton(StripeClient::class, function () {
             $secret = (string) config('payments.stripe.secret');
 
@@ -36,67 +24,84 @@ class AppServiceProvider extends ServiceProvider
         });
     }
 
-    /**
-     * Bootstrap any application services.
-     */
     public function boot(): void
     {
-        // General API baseline, applied to the whole 'api' middleware
-        // group (see bootstrap/app.php) — Laravel 13's default 'api'
-        // group ships without this; it's never been added until now.
-        // Keyed by user id when authenticated, IP otherwise, so
-        // authenticated and public routes both get a sane default even
-        // though this app mixes both under the same group.
+        $this->forgetTenantBetweenJobs();
+
+        // Keyed by user id when authenticated, IP otherwise — this app mixes
+        // authenticated and public routes under the same group.
         RateLimiter::for('api', function (Request $request) {
             return Limit::perMinute(60)->by($request->user()?->id ?: $request->ip());
         });
 
-        // Stricter than the general baseline on purpose: unlimited login
-        // attempts today means unlimited password guesses. Keyed by
-        // email+IP (same pattern Laravel's own Fortify starter kit uses)
-        // rather than IP alone, so a legitimate user isn't locked out by
-        // someone else's failed attempts against a different account from
-        // the same IP (e.g. a shared office network).
+        // Keyed by email+IP, not IP alone, so one person's failed attempts
+        // can't lock out everyone else on a shared office network.
         RateLimiter::for('login', function (Request $request) {
             return Limit::perMinute(5)->by($request->input('email').$request->ip());
         });
 
-        // The one unauthenticated WRITE path in this app — no user to key
-        // by, so IP is the only option. Generous enough for a real
-        // shopper placing more than one order, bounded against a script
-        // spamming fake orders (which would deduct real stock and now
-        // also spam the tenant's notifications).
+        // The one unauthenticated WRITE path — no user to key by. Bounded
+        // against scripted fake orders, which deduct real stock.
         RateLimiter::for('public-orders', function (Request $request) {
             return Limit::perMinute(10)->by($request->ip());
         });
 
-        // Looser than the general api limiter on purpose. This is hit on
-        // every storefront page load, and mobile carriers in this market
-        // CGNAT very large numbers of users behind very few egress IPs — the
-        // 60/min general per-IP limit would 429 real customers browsing a
-        // shop, not abusers.
+        // Looser on purpose: hit on every storefront page load, and mobile
+        // carriers here CGNAT huge numbers of users behind few egress IPs, so
+        // 60/min would 429 real customers rather than abusers.
         RateLimiter::for('public-shop', function (Request $request) {
             return Limit::perMinute(120)->by($request->ip());
         });
 
-        // Payment webhooks. Generous, and per-IP only as a crude abuse
-        // brake — the real gate is the signature check inside each
-        // gateway, which rejects anything unsigned before it can do
-        // anything. Providers legitimately burst (a backlog being
-        // redelivered after an outage) from many source IPs, and throttling
-        // those into 429s just makes them retry the same events later.
+        // A crude abuse brake only — the real gate is the signature check in
+        // each gateway. Providers legitimately burst when redelivering a
+        // backlog, and 429ing those just makes them retry later.
         RateLimiter::for('payment-webhooks', function (Request $request) {
             return Limit::perMinute(300)->by($request->ip());
         });
 
-        // Stricter than public-orders: this creates a whole new tenant
-        // per request, not just an order row — a more expensive action to
-        // spam. IP alone is enough here (unlike login, there's no
-        // per-account brute-force concern to also guard against, and the
-        // owner_email uniqueness check already rejects duplicate signups
-        // regardless of rate).
+        // Tighter than the shop login: there are a handful of these accounts
+        // ever, and each one can read and settle money across every tenant on
+        // the platform, so a slow brute force is worth making slower still.
+        RateLimiter::for('platform-login', function (Request $request) {
+            return Limit::perMinute(3)->by($request->input('email').$request->ip());
+        });
+
+        // Stricter than public-orders: this creates a whole tenant per
+        // request. IP alone is enough — there's no per-account brute-force
+        // concern here the way there is on login.
         RateLimiter::for('register', function (Request $request) {
             return Limit::perMinute(5)->by($request->ip());
         });
+    }
+
+    /**
+     * Clears the 'tenant' container binding around every queued job.
+     *
+     * A BLOCKING PREREQUISITE of running a worker at all, and the reason this
+     * exists rather than being added when something breaks. ResolveTenant and
+     * StorefrontProductService both bind the tenant with app()->instance() and
+     * never forget it. Under PHP-FPM that is harmless — the container dies
+     * with the request — but a worker process is long-lived and does NOT get a
+     * fresh container between jobs. Without this, a job that binds a tenant
+     * leaves it bound for whatever runs next on that worker, and the next job
+     * silently reads and writes another shop's data through TenantScope.
+     *
+     * Cleared BEFORE as well as after: `after` alone would still leave the
+     * first job of a worker's life exposed to whatever the boot sequence
+     * happened to bind, and a job that dies in a way neither `after` nor
+     * `failing` catches would poison every job behind it.
+     *
+     * Jobs that legitimately need a tenant must bind it themselves and treat
+     * it as request-scoped, exactly as the HTTP middleware does. Nothing may
+     * assume a binding it did not make.
+     */
+    private function forgetTenantBetweenJobs(): void
+    {
+        $forget = fn () => app()->forgetInstance('tenant');
+
+        Queue::before($forget);
+        Queue::after($forget);
+        Queue::failing($forget);
     }
 }

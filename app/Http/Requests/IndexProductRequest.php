@@ -18,18 +18,15 @@ class IndexProductRequest extends FormRequest
         return [
             'search' => ['sometimes', 'string', 'max:255'],
             'category_id' => ['sometimes', 'integer', function ($attribute, $value, $fail) {
-                // Category::find() applies the tenant global scope, so this
-                // rejects a category_id belonging to another tenant without
-                // ever comparing tenant_id by hand.
+                // find() applies the tenant scope, so another tenant's
+                // category_id is rejected without comparing tenant_id by hand.
                 if (! Category::find($value)) {
                     $fail('The selected category does not exist.');
                 }
             }],
-            // Laravel's 'boolean' rule only accepts the literal types
-            // true/false/0/1/"0"/"1" — a query string always sends "true"/
-            // "false" as plain strings, which it rejects. Rule::in()
-            // accepts both forms; filters() below converts whichever one
-            // arrived into a real bool via $this->boolean().
+            // 'boolean' rejects the strings "true"/"false", which is all a
+            // query string can send. Rule::in() accepts both forms; filters()
+            // converts to a real bool.
             'is_active' => ['sometimes', Rule::in(['0', '1', 'true', 'false'])],
             'low_stock' => ['sometimes', Rule::in(['0', '1', 'true', 'false'])],
             'per_page' => ['sometimes', 'integer', 'min:1', 'max:100'],
@@ -37,13 +34,9 @@ class IndexProductRequest extends FormRequest
     }
 
     /**
-     * validated() alone leaves is_active/low_stock as the raw query-string
-     * string ("1"/"0"/"true"/"false"), not a real bool, and — more
-     * importantly — omits the key entirely when the client didn't send it.
-     * That absent-vs-false distinction has to survive into the array the
-     * service receives: is_active=false is a real filter (show only
-     * inactive products), not "no filter", so callers must check with
-     * array_key_exists(), never empty()/??.
+     * The absent-vs-false distinction has to survive into the service:
+     * is_active=false is a real filter (show only inactive), not "no filter",
+     * so callers must use array_key_exists(), never empty()/??.
      */
     public function filters(): array
     {

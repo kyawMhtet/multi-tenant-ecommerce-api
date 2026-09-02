@@ -11,16 +11,10 @@ use Illuminate\Support\Facades\DB;
 class ReportService
 {
     /**
-     * No tenant parameter, same as every other Service in this app —
-     * relies entirely on the ambient tenant scope already bound by the
-     * 'tenant' middleware. Revenue and cost are two separate queries, not
-     * one join: joining order_items onto orders and summing orders.total
-     * would fan out (an order with 3 line items would count its total 3
-     * times), so revenue sums from Order alone and cost sums from
-     * OrderItem, each independently filtered by the same status/date
-     * window via Order::REVENUE_STATUSES — the same "what counts as a
-     * real sale" rule DashboardService's today card uses, so the two can
-     * never quietly disagree about the same day's numbers.
+     * Revenue and cost are two queries, not one join: joining order_items onto
+     * orders and summing orders.total would FAN OUT — a 3-line order would
+     * count its total three times. Both use Order::REVENUE_STATUSES so they
+     * can't disagree with the dashboard about the same day.
      */
     public function getSalesProfitReport(array $filters): array
     {
@@ -32,13 +26,14 @@ class ReportService
             ->whereDate('created_at', '>=', $dateFrom)
             ->whereDate('created_at', '<=', $dateTo);
 
-        $revenue = round((float) (clone $eligibleOrders)->sum('total'), 2);
+        // Goods only — see Order::GOODS_REVENUE_SQL for why.
+        $revenue = round((float) (clone $eligibleOrders)->sum(DB::raw(Order::GOODS_REVENUE_SQL)), 2);
+        $deliveryFees = round((float) (clone $eligibleOrders)->sum('delivery_fee'), 2);
         $orderCount = (clone $eligibleOrders)->count();
 
-        // Computed as a DB-side aggregate, never by loading OrderItem rows
-        // into PHP and summing — keeps this O(1) round-trips regardless of
-        // how many orders fall in the range. whereHas applies the same
-        // status/date filter as $eligibleOrders without a join or fan-out.
+        // A DB-side aggregate, never loading rows into PHP: O(1) round-trips
+        // however many orders are in range. whereHas applies the same filter
+        // without a join or fan-out.
         $cost = round((float) OrderItem::query()
             ->whereHas('order', function ($query) use ($dateFrom, $dateTo) {
                 $query->whereIn('status', Order::REVENUE_STATUSES)
@@ -55,9 +50,11 @@ class ReportService
             'revenue' => $this->money($revenue),
             'cost' => $this->money($cost),
             'profit' => $this->money($profit),
-            // null, not 0, when there's nothing to divide by — 0 would
-            // misleadingly read as "broke even" / "orders averaged $0"
-            // instead of "no data for this range."
+            // Alongside, not folded in: real money banked, so hiding it would
+            // stop the report reconciling against the till, but it isn't
+            // margin. revenue + this is what actually came in.
+            'delivery_fees_collected' => $this->money($deliveryFees),
+            // null, not 0: 0 reads as "broke even", not "no data".
             'margin_percentage' => $revenue > 0 ? round(($profit / $revenue) * 100, 2) : null,
             'order_count' => $orderCount,
             'average_order_value' => $orderCount > 0 ? $this->money($revenue / $orderCount) : null,
@@ -66,13 +63,9 @@ class ReportService
     }
 
     /**
-     * Every other money value in this API comes from a decimal:2 Eloquent
-     * cast, which Laravel serializes as a fixed-2-decimal string ("400.00"),
-     * not a float — floats silently drop trailing zeros in JSON (400.0
-     * becomes 400), which would make this the one endpoint in the app
-     * whose money fields format inconsistently. These values are computed
-     * aggregates, not cast columns, so this reproduces that formatting by
-     * hand rather than inheriting it for free.
+     * Every other money value here comes from a decimal:2 cast, which
+     * serializes as "400.00". Floats drop trailing zeros in JSON (400.0 → 400),
+     * so these computed aggregates reproduce that formatting by hand.
      */
     private function money(float $value): string
     {
@@ -80,15 +73,12 @@ class ReportService
     }
 
     /**
-     * Two grouped queries merged over every calendar day in range, not
-     * just days with orders — a trend chart needs a continuous x-axis,
-     * and a quiet day (0 sales) is meaningful information, not an absent
-     * data point. The cost query needs an actual join here (unlike the
-     * totals query above): GROUP BY needs a column from the related table
-     * (orders.created_at), which an EXISTS-based whereHas subquery can't
-     * expose to the outer query's SELECT/GROUP BY. The join doesn't
-     * disable OrderItem's own tenant scope — TenantScope table-qualifies
-     * its where clause, so it still applies correctly alongside the join.
+     * Every calendar day in range, not just days with orders — a trend chart
+     * needs a continuous x-axis, and a quiet day is information.
+     *
+     * The cost query needs a real join here: GROUP BY needs orders.created_at,
+     * which an EXISTS-based whereHas can't expose. TenantScope table-qualifies
+     * its where clause, so it still applies alongside the join.
      */
     private function getDailyBreakdown(string $dateFrom, string $dateTo): array
     {
@@ -96,7 +86,7 @@ class ReportService
             ->whereIn('status', Order::REVENUE_STATUSES)
             ->whereDate('created_at', '>=', $dateFrom)
             ->whereDate('created_at', '<=', $dateTo)
-            ->selectRaw('DATE(created_at) as date, COUNT(*) as order_count, SUM(total) as revenue')
+            ->selectRaw('DATE(created_at) as date, COUNT(*) as order_count, SUM('.Order::GOODS_REVENUE_SQL.') as revenue')
             ->groupBy('date')
             ->get()
             ->keyBy('date');

@@ -3,17 +3,12 @@
 namespace App\Services\Payments\Data;
 
 /**
- * The complete vocabulary this application understands about a payment.
+ * The complete vocabulary this app understands about a payment. Each gateway
+ * translates its own dialect into one of these three at the edge, so nothing
+ * downstream learns which provider was involved.
  *
- * Every gateway speaks its own dialect — Stripe says
- * "checkout.session.completed", 2C2P posts a form with a status code,
- * MyanMyanPay will do something else again. Each gateway class translates
- * its dialect into one of these three cases at the edge, and nothing
- * downstream ever learns which provider was involved.
- *
- * Keeping this set deliberately tiny is the point. If a fourth case ever
- * feels necessary, that's a signal a gateway detail is leaking into the
- * application — check whether it can be expressed as one of these first.
+ * Keeping the set tiny is the point: a fourth case is a signal that a gateway
+ * detail is leaking in — check it can't be expressed as one of these first.
  */
 enum PaymentEventType: string
 {

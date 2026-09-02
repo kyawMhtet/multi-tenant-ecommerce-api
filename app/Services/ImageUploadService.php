@@ -12,28 +12,20 @@ use Intervention\Image\ImageManager;
 use Throwable;
 
 /**
- * GD, not Imagick: both are available on this server, but GD needs no
- * extra configuration and is sufficient for a plain resize-and-recompress
- * — nothing here uses a feature (e.g. advanced color profiles) that would
- * actually benefit from Imagick.
+ * GD, not Imagick: it needs no extra configuration and nothing here uses a
+ * feature that would benefit from Imagick.
  */
 class ImageUploadService
 {
-    /**
-     * Longest side, not exact dimensions: a product photo's aspect ratio
-     * is never known ahead of time, so capping one side and letting
-     * scaleDown() preserve the ratio avoids distorting or cropping it.
-     */
+    /** Longest side, not exact dimensions — preserves any aspect ratio. */
     private const MAX_DIMENSION = 1600;
 
     private const JPEG_QUALITY = 80;
 
     /**
-     * Re-encodes every upload as JPEG regardless of the source format —
-     * this is what actually keeps stored files small (a PNG screenshot
-     * or a phone-camera photo can be 5-10x the size of an equivalent
-     * JPEG at this quality), not just the dimension cap. Storage size,
-     * not just display size, is the point of "optimize."
+     * Re-encodes every upload as JPEG whatever the source: that, not the
+     * dimension cap, is what keeps files small — a PNG screenshot can be 5-10x
+     * an equivalent JPEG at this quality.
      */
     public function store(UploadedFile $file, string $directory): string
     {
@@ -42,14 +34,12 @@ class ImageUploadService
         try {
             $image = $manager->decodeSplFileInfo($file);
         } catch (Throwable $e) {
-            // The `image` validation rule already ran before this — this
-            // catches what it can't: a file whose extension/MIME looks
-            // right but whose actual bytes aren't a real, intact image.
+            // Catches what the `image` rule can't: a file whose MIME looks
+            // right but whose bytes aren't an intact image.
             throw new InvalidImageException(previous: $e);
         }
 
-        // scaleDown (not scale/resize): only shrinks images larger than
-        // the cap, never upscales a smaller one.
+        // scaleDown only shrinks; it never upscales a smaller image.
         $image->scaleDown(width: self::MAX_DIMENSION, height: self::MAX_DIMENSION);
 
         $encoded = $image->encodeUsingFormat(Format::JPEG, quality: self::JPEG_QUALITY);

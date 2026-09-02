@@ -165,22 +165,44 @@ test('accepts a viber phone number but rejects a viber url', function () {
  * service's Arr::only + Tenant's trimmed $fillable) is only real if
  * something proves it.
  */
-test('ignores attempts to change slug, plan, subscription_status or is_active', function () {
-    // Read from the DB, not the in-memory instance: plan and
-    // subscription_status come from column defaults, so they're still null
-    // on the object Tenant::create() returned.
-    $before = $this->tenant->fresh()->only(['slug', 'plan', 'subscription_status', 'is_active']);
+test('ignores attempts to change slug or is_active', function () {
+    // Read from the DB, not the in-memory instance: is_active comes from a
+    // column default, so it's still null on the object Tenant::create()
+    // returned.
+    $before = $this->tenant->fresh()->only(['slug', 'is_active']);
 
     patchProfile([
         'name' => 'Renamed',
         'slug' => 'hijacked-slug',
-        'plan' => 'enterprise',
-        'subscription_status' => 'active',
         'is_active' => false,
     ])->assertOk();
 
-    expect($this->tenant->fresh()->only(['slug', 'plan', 'subscription_status', 'is_active']))
+    expect($this->tenant->fresh()->only(['slug', 'is_active']))
         ->toBe($before);
+});
+
+/**
+ * Plan and subscription state used to be columns on `tenants`, kept out of
+ * $fillable so this endpoint couldn't grant a shop a paid plan. They now
+ * live on `subscriptions` instead, which makes the guarantee structural
+ * rather than a whitelist that has to stay correct — there is no plan field
+ * on the tenant for the request to reach. Worth pinning anyway: this is the
+ * endpoint a shop could most plausibly use to bill itself nothing.
+ */
+test('the shop profile endpoint cannot grant itself a plan or extend its trial', function () {
+    $subscription = $this->tenant->subscription;
+    $before = $subscription->only(['plan', 'status', 'trial_ends_at']);
+
+    patchProfile([
+        'name' => 'Renamed',
+        'plan' => 'enterprise',
+        'status' => 'active',
+        'subscription_status' => 'active',
+        'trial_ends_at' => now()->addYears(10)->toDateTimeString(),
+    ])->assertOk();
+
+    expect($subscription->fresh()->only(['plan', 'status', 'trial_ends_at']))->toEqual($before)
+        ->and($this->tenant->fresh()->name)->toBe('Renamed');
 });
 
 test('requires authentication', function () {

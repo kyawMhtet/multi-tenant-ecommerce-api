@@ -14,13 +14,10 @@ use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
- * Orchestrates storefront checkout: create the order, then start its
- * payment.
+ * Storefront checkout: create the order, then start its payment.
  *
- * Deliberately separate from OrderService. Order creation is about stock
- * and money owed; this is about collecting it. Keeping them apart means
- * OrderService never depends on the payment layer, so the POS flow (which
- * has no gateway at all) stays untouched by any of this.
+ * Separate from OrderService so that service never depends on the payment
+ * layer — the POS flow has no gateway at all.
  */
 class CheckoutService
 {
@@ -31,24 +28,14 @@ class CheckoutService
     ) {}
 
     /**
-     * The ordering here is the important part.
+     * The ordering is the important part: commit the order FIRST, then call
+     * the gateway. createOrderItems() holds row locks on every variant it
+     * deducts, and holding those across a network round-trip would stall
+     * every checkout touching the same product.
      *
-     * The order is created and committed FIRST, in its own transaction,
-     * and only then does the gateway get called. Calling a payment
-     * provider from inside the transaction would be a genuine bug, not
-     * just untidy: createOrderItems() takes row locks on every variant it
-     * deducts, and holding those across a network round-trip to Stripe
-     * means every other checkout touching the same product blocks until
-     * Stripe answers. A slow gateway would become a site-wide stall. It
-     * would also leave an orphaned payment session behind whenever the
-     * transaction rolled back afterwards.
-     *
-     * Committing first creates the opposite risk — an order exists with
-     * stock reserved, and then payment initiation fails — so that case is
-     * compensated explicitly: the order is cancelled, which returns the
-     * stock via the existing ledgered path. Without that, a Stripe outage
-     * would quietly eat inventory, and nothing would ever release it,
-     * because the release depends on a session that was never created.
+     * Committing first creates the opposite risk — stock reserved, then
+     * initiation fails — so that's compensated explicitly by cancelling,
+     * which returns the stock through the ledgered path.
      */
     public function checkout(array $data): CheckoutResult
     {
@@ -69,13 +56,8 @@ class CheckoutService
     }
 
     /**
-     * Re-fetched rather than trusted from the request. StorePublicOrderRequest
-     * already validated that this method exists and is enabled for the
-     * current tenant, but the service doesn't assume that check ran or was
-     * correct — the same reasoning OrderService re-resolves cart lines
-     * instead of trusting validated() alone. The tenant scope on
-     * TenantPaymentMethod means another shop's method can't be found here
-     * even if validation were bypassed entirely.
+     * Re-fetched rather than trusted from the request — the tenant scope means
+     * another shop's method isn't found even if validation were bypassed.
      */
     private function resolveMethod(string $method): TenantPaymentMethod
     {
@@ -83,16 +65,10 @@ class CheckoutService
     }
 
     /**
-     * A pending Payment row is written for anything with a provider
-     * reference, and it does double duty: it's the record that an attempt
-     * was made (useful when supporting a customer who says they paid), and
-     * it's how the webhook finds its way back to this order later, since
-     * payments carries unique(['gateway','transaction_ref']).
-     *
-     * Manual methods (cash on delivery) produce no reference and so no row
-     * — there is nothing pending with a provider, just an order awaiting a
-     * human. Its Payment row gets created when someone confirms the cash
-     * actually arrived.
+     * The pending row is how the webhook finds its way back to this order,
+     * via payments.unique(['gateway','transaction_ref']). Manual methods
+     * produce no reference and so no row — nothing is pending with a
+     * provider, just an order awaiting a human.
      */
     private function initiatePayment(Order $order, TenantPaymentMethod $method): PaymentInitiation
     {
@@ -112,18 +88,13 @@ class CheckoutService
     }
 
     /**
-     * Stores the customer's transfer screenshot against a pending payment,
-     * for manual methods that were paid out-of-band.
+     * Always status='pending', never 'success'. A screenshot is a claim, not a
+     * payment — trivially forged and often just wrong (right amount, wrong
+     * shop). Only the shop confirming turns it into money received.
      *
-     * Recorded as status='pending', never 'success'. A screenshot is a
-     * claim, not a payment — trivially forged, and frequently just wrong
-     * (right amount, wrong shop). Only the shop confirming turns this into
-     * money received, which is the same judgement they already make over
-     * Facebook and Line today.
-     *
-     * Ignored for gateway-backed methods: a card payment's evidence is the
-     * webhook, and accepting an image alongside it would only invite
-     * someone to think the two are interchangeable.
+     * Ignored for gateway-backed methods: a card payment's evidence is its
+     * webhook, and accepting an image alongside invites treating them as
+     * interchangeable.
      */
     private function recordProofOfPayment(Order $order, TenantPaymentMethod $method, ?UploadedFile $proof): void
     {
@@ -141,21 +112,22 @@ class CheckoutService
     }
 
     /**
-     * Compensating action for a failed payment start. Cancelling routes
-     * through updateOrderStatus() rather than touching stock directly, so
-     * the restore goes through the same row-locked, ledgered,
-     * double-credit-guarded path every other cancellation uses.
+     * Compensating action for a failed payment start.
      *
-     * A failure to release is logged and swallowed: the customer is about
-     * to receive the original payment error, and replacing it with a
-     * second, more confusing one would tell them less about what went
-     * wrong. The stranded stock is recoverable by cancelling the order in
-     * the admin UI; an unexplainable error page is not.
+     * A failure to release is logged and swallowed: the customer is about to
+     * get the original payment error, and replacing it with a second, more
+     * confusing one tells them less. Stranded stock is recoverable from the
+     * admin UI; an unexplainable error page is not.
      */
     private function releaseOrder(Order $order, Throwable $original): void
     {
         try {
-            $this->orderService->updateOrderStatus($order, ['status' => 'cancelled']);
+            // cancelOrder(), not a bare status write, for the same reason
+            // WebhookProcessor uses it. cancelled_by stays null — nobody did
+            // this, the gateway was unreachable.
+            $this->orderService->cancelOrder($order, [
+                'cancellation_reason' => 'payment_initiation_failed',
+            ], cancelledBy: null);
         } catch (Throwable $releaseFailure) {
             Log::error('Failed to release stock after payment initiation failed.', [
                 'order_id' => $order->id,

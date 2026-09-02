@@ -7,15 +7,10 @@ use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
 /**
- * Configures one payment method for the authenticated shop.
- *
- * `method` is validated against a fixed catalogue rather than accepted as
- * free text. The identifier drives the customer-facing label, whether a
- * gateway is involved, and whether proof-of-payment applies — so an
- * arbitrary string would produce a method nothing knows how to render or
- * process. `gateway` is deliberately NOT accepted from input at all: which
- * processor backs a method is a property of the method, resolved from the
- * catalogue, never something a client chooses.
+ * `method` is validated against the catalogue, not accepted as free text — an
+ * arbitrary string would produce a method nothing knows how to render.
+ * `gateway` is NOT accepted from input at all: which processor backs a method
+ * is a property of the method, never a client's choice.
  */
 class UpsertPaymentMethodRequest extends FormRequest
 {
@@ -26,10 +21,8 @@ class UpsertPaymentMethodRequest extends FormRequest
 
     protected function prepareForValidation(): void
     {
-        // Multipart sends every field as a string, and Laravel's 'boolean'
-        // rule rejects the literal "true" — the same trap documented in
-        // UpdateTenantRequest. A QR upload makes this request multipart, so
-        // normalise before validating rather than after.
+        // Multipart sends every field as a string and 'boolean' rejects the
+        // literal "true" — same trap as UpdateTenantRequest.
         foreach (['is_enabled', 'remove_qr'] as $flag) {
             if ($this->has($flag)) {
                 $this->merge([
@@ -46,9 +39,8 @@ class UpsertPaymentMethodRequest extends FormRequest
             'is_enabled' => ['sometimes', 'boolean'],
             'sort_order' => ['sometimes', 'integer', 'min:0', 'max:999'],
 
-            // The shop's own payment QR. Same limits as every other upload
-            // in this app; ImageUploadService re-encodes it, which also
-            // strips whatever metadata the shop's phone attached.
+            // ImageUploadService re-encodes it, which also strips whatever
+            // metadata the shop's phone attached.
             'qr' => ['sometimes', 'image', 'max:2048'],
             'remove_qr' => ['sometimes', 'boolean', Rule::prohibitedIf(fn () => $this->hasFile('qr'))],
 

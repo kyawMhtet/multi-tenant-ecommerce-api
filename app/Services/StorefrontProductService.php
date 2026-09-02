@@ -10,16 +10,11 @@ use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 class StorefrontProductService
 {
     /**
-     * Unlike findPublicVariant(), this runs with a tenant already bound —
-     * the storefront homepage knows its own tenant from the subdomain it's
-     * served on and sends X-Tenant-Slug like any other tenant-aware public
-     * route (see routes/api.php), so this is a completely ordinary scoped
-     * query with no TenantScope bypass.
+     * Unlike findPublicVariant(), a tenant is already bound here (the
+     * storefront sends X-Tenant-Slug), so this is an ordinary scoped query.
      *
-     * Always active-only, on both the product and every included variant:
-     * a public catalog is not a place to toggle visibility, and a product
-     * whose variants are ALL inactive is excluded entirely rather than
-     * shown with an empty variants list.
+     * Active-only on both product and variants: a product whose variants are
+     * ALL inactive is excluded entirely, not shown with an empty list.
      */
     public function listPublicProducts(array $filters): LengthAwarePaginator
     {
@@ -30,9 +25,7 @@ class StorefrontProductService
                 'images',
             ]);
 
-        // Name only, not sku/barcode like the admin filter — those are
-        // internal identifiers a customer has no reason to type into a
-        // storefront search box.
+        // Name only, not sku/barcode — those are internal identifiers.
         if (! empty($filters['search'])) {
             $query->where('name', 'like', '%'.$filters['search'].'%');
         }
@@ -45,27 +38,16 @@ class StorefrontProductService
     }
 
     /**
-     * Resolves a public product page from a variant slug alone — no tenant
-     * header, no subdomain, nothing but the slug, since this is meant to
-     * work as a plain link pasted into a chat app, which can't attach a
-     * custom header the way an authenticated API client can.
+     * Resolves a public product page from the slug alone — no header, no
+     * subdomain — since this has to work as a link pasted into a chat app.
      *
-     * Bypassing TenantScope specifically (not withoutGlobalScopes(), which
-     * strips every global scope including SoftDeletingScope) is required
-     * here, not just harmless: before this call, no tenant is bound in the
-     * container yet (that's the whole point — we don't have one to bind
-     * until we've looked the variant up), so TenantScope would be a silent
-     * no-op regardless. Making the bypass explicit means this route's
-     * behavior doesn't depend on that no-op-when-absent coincidence — it's
-     * a deliberate, documented exception (see CLAUDE.md), not an accident
-     * of timing. Stripping every scope instead would also make a
-     * soft-deleted variant resolvable here, which is never intended.
+     * No tenant is bound yet (that's the point), so TenantScope would no-op
+     * anyway; the explicit bypass makes that deliberate rather than an
+     * accident of timing. A sanctioned exception, see CLAUDE.md. Never
+     * withoutGlobalScopes(), which would make soft-deleted variants resolve.
      *
-     * is_active is checked on the variant, its product, and its tenant —
-     * a shop owner's "hide this" toggle at any of those three levels must
-     * make the item disappear from this endpoint entirely (404, not a
-     * flag in the response), and an inactive tenant's storefront pages
-     * must not resolve at all.
+     * is_active is checked on variant, product AND tenant — a "hide this"
+     * toggle at any level must 404, not return a flag.
      */
     public function findPublicVariant(string $slug): ProductVariant
     {
@@ -75,23 +57,18 @@ class StorefrontProductService
             ->whereHas('product', fn ($query) => $query->withoutGlobalScope(TenantScope::class)->where('is_active', true))
             ->whereHas('tenant', fn ($query) => $query->where('is_active', true))
             ->with([
-                // The nested images() bypasses TenantScope too, same
-                // reasoning as the two bypasses right below it: no tenant
-                // is bound at all yet at this point in the request.
+                // Nested bypasses for the same reason: still no tenant bound.
                 'product.variants' => fn ($query) => $query->withoutGlobalScope(TenantScope::class)->where('is_active', true)
                     ->with(['images' => fn ($imageQuery) => $imageQuery->withoutGlobalScope(TenantScope::class)]),
                 'product.images' => fn ($query) => $query->withoutGlobalScope(TenantScope::class),
-                // The product page renders the shop's header (logo, name)
-                // from this — see StorefrontProductResource's 'shop' key.
+                // Renders the shop header — see StorefrontProductResource.
                 'product.tenant',
             ])
             ->firstOrFail();
 
-        // Bind the tenant explicitly rather than relying on the scope
-        // staying a no-op for the rest of this request — anything touched
-        // afterward (e.g. a future related lookup) should behave exactly
-        // like it does on every other tenant-aware route, not silently
-        // skip scoping because nothing happened to be bound yet.
+        // Bound explicitly so anything touched later in this request behaves
+        // like every other tenant-aware route, rather than silently skipping
+        // scoping because nothing happened to be bound.
         app()->instance('tenant', $variant->tenant);
 
         return $variant;

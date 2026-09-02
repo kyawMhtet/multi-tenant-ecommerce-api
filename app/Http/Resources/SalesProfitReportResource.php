@@ -21,6 +21,7 @@ class SalesProfitReportResource extends JsonResource
             'revenue' => $data['revenue'],
             'cost' => $data['cost'],
             'profit' => $data['profit'],
+            'delivery_fees_collected' => $data['delivery_fees_collected'],
             'margin_percentage' => $data['margin_percentage'],
             'order_count' => $data['order_count'],
             'average_order_value' => $data['average_order_value'],

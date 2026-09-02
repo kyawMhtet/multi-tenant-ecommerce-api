@@ -17,14 +17,10 @@ class InsufficientStockException extends RuntimeException
     }
 
     /**
-     * Deliberately generic: getMessage() (with the real SKU and stock
-     * count) is still what gets logged internally, but this exception is
-     * now reachable from the fully unauthenticated public checkout route
-     * too, not just authenticated POS staff — echoing exact stock levels
-     * back to any anonymous caller who can guess a variant id would leak
-     * real-time inventory data through an error message instead of a
-     * response body, the exact thing the storefront resource's coarse
-     * stock_status already avoids on the happy path.
+     * Deliberately generic. getMessage() still logs the real SKU and count, but
+     * this is reachable from the unauthenticated checkout — echoing exact stock
+     * to an anonymous caller would leak through an error what stock_status
+     * carefully avoids leaking through a response.
      */
     public function render(Request $request): JsonResponse
     {

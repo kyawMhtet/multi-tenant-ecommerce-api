@@ -68,7 +68,34 @@ function makeTenantUser(array $userOverrides = [], array $tenantOverrides = []):
         'role' => 'owner',
     ], $userOverrides));
 
-    return [$tenant, $user];
+    // Every real tenant leaves registration with one, so a fixture without
+    // one would be a shop shape that cannot occur — and every entitlement
+    // gate reads this relation. Defaulting it here keeps the ~40 existing
+    // test files working unchanged rather than making each one think about
+    // billing it does not care about.
+    app(\App\Services\Billing\SubscriptionService::class)->startTrial($tenant);
+
+    return [$tenant, $user->fresh()];
+}
+
+/**
+ * Puts a tenant's subscription into a specific state. Use this for anything
+ * testing entitlement — makeTenantUser() leaves a shop mid-trial, which is
+ * the permissive case and would hide a gate that never fires.
+ */
+function subscribeTenant(\App\Models\Tenant $tenant, array $attributes = []): \App\Models\Subscription
+{
+    $subscription = $tenant->subscription()->firstOrFail();
+
+    $subscription->forceFill(array_merge([
+        'plan' => 'pro',
+        'status' => 'active',
+        'gateway' => 'stripe',
+        'trial_ends_at' => null,
+        'current_period_ends_at' => now()->addMonth(),
+    ], $attributes))->save();
+
+    return $tenant->unsetRelation('subscription')->subscription;
 }
 
 /**
@@ -187,6 +214,25 @@ function createOnlineOrderForTenant(\App\Models\Tenant $tenant, array $items, ar
 }
 
 /**
+ * Creates a courier for the given tenant, same bind-tenant-then-forget
+ * pattern as the other fixture helpers (DeliveryProvider's tenant_id is
+ * likewise filled by BelongsToTenant's creating hook, not mass-assigned).
+ */
+function createDeliveryProviderForTenant(\App\Models\Tenant $tenant, array $overrides = []): \App\Models\DeliveryProvider
+{
+    app()->instance('tenant', $tenant);
+
+    $provider = \App\Models\DeliveryProvider::create(array_merge([
+        'name' => 'Royal Express',
+        'phone' => '09111222333',
+    ], $overrides));
+
+    app()->forgetInstance('tenant');
+
+    return $provider;
+}
+
+/**
  * Enables a payment method for a tenant, same bind-tenant-then-forget
  * pattern as the other fixture helpers (TenantPaymentMethod's tenant_id is
  * likewise filled by BelongsToTenant's creating hook, not mass-assigned).
@@ -209,4 +255,76 @@ function enablePaymentMethodForTenant(\App\Models\Tenant $tenant, array $overrid
     app()->forgetInstance('tenant');
 
     return $method;
+}
+
+/**
+ * Platform staff. NOT a User and never given a tenant — see the
+ * platform_admins migration for why that separation is the security model
+ * rather than tidiness.
+ */
+function makePlatformAdmin(array $overrides = []): \App\Models\PlatformAdmin
+{
+    return \App\Models\PlatformAdmin::create(array_merge([
+        'name' => 'Platform Staff',
+        'email' => 'staff@platform.test',
+        'password' => \Illuminate\Support\Facades\Hash::make('correct-horse-battery'),
+        'is_active' => true,
+    ], $overrides));
+}
+
+/**
+ * A pending bank-transfer invoice for a tenant, the state a shop is in after
+ * choosing "pay by transfer". Same bind-tenant-then-forget pattern as the
+ * other fixture helpers.
+ */
+function createTransferInvoice(\App\Models\Tenant $tenant, array $overrides = []): \App\Models\SubscriptionInvoice
+{
+    app()->instance('tenant', $tenant);
+
+    $invoice = $tenant->subscription->invoices()->create(array_merge([
+        'plan' => 'pro',
+        'amount' => 750,
+        'currency' => 'THB',
+        'gateway' => 'manual',
+        'period_start' => now(),
+        'period_end' => now()->addMonth(),
+        'status' => 'pending',
+        'proof_path' => 'billing-proofs/fake.jpg',
+    ], $overrides));
+
+    app()->forgetInstance('tenant');
+
+    return $invoice;
+}
+
+/**
+ * An HTTP client authenticated as a freshly created platform admin.
+ *
+ * Use ONE authenticated identity per test: Sanctum caches the resolved user
+ * for the whole test process, so a shop token and a platform token in the same
+ * test would both resolve as whichever was used first. Set shop-side state
+ * through services (see requestTransferForTenant) and assert against models.
+ */
+function actingAsPlatform(): \Illuminate\Testing\TestResponse|\Tests\TestCase
+{
+    return test()->withHeader(
+        'Authorization', 'Bearer '.makePlatformAdmin()->createToken('t')->plainTextToken,
+    );
+}
+
+/**
+ * Asks for a bank transfer through the real SubscriptionService, without
+ * spending the test's one HTTP identity on the shop side.
+ */
+function requestTransferForTenant(\App\Models\Tenant $tenant, string $plan): \App\Models\SubscriptionInvoice
+{
+    app()->instance('tenant', $tenant);
+
+    $initiation = app(\App\Services\Billing\SubscriptionService::class)->subscribe(
+        $tenant->subscription()->firstOrFail(), $plan, 'manual',
+    );
+
+    app()->forgetInstance('tenant');
+
+    return $initiation->invoice;
 }

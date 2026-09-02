@@ -10,7 +10,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 #[Fillable([
     'order_id', 'product_variant_id', 'product_name', 'variant_name', 'sku', 'attributes',
-    'quantity', 'unit_price', 'unit_cost', 'line_total',
+    'quantity', 'is_preorder', 'preorder_lead_time_days', 'unit_price', 'unit_cost', 'line_total',
 ])]
 class OrderItem extends Model
 {
@@ -21,6 +21,8 @@ class OrderItem extends Model
         return [
             'attributes' => 'array',
             'quantity' => 'decimal:2',
+            'is_preorder' => 'boolean',
+            'preorder_lead_time_days' => 'integer',
             'unit_price' => 'decimal:2',
             'unit_cost' => 'decimal:2',
             'line_total' => 'decimal:2',

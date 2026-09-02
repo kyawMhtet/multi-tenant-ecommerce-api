@@ -9,36 +9,24 @@ use App\Services\Payments\Data\PaymentInitiation;
 use Illuminate\Http\Request;
 
 /**
- * Everything the application needs from a payment provider, and nothing
- * more. Adding a provider means adding one class implementing this — no
- * migration, no changes to OrderService, no new branches in checkout.
- *
- * Two responsibilities only: start a payment, and interpret what the
- * provider tells us afterwards.
+ * Everything the app needs from a payment provider. Adding one means adding
+ * one class — no migration, no changes to OrderService, no new branches.
  */
 interface PaymentGateway
 {
     /**
-     * Begin collecting payment for an order.
-     *
-     * Receives the tenant's own configuration for this method, since with
-     * Stripe Connect the charge must name the shop's connected account —
-     * the money goes to the shop, never to this platform.
+     * Receives the tenant's own config because with Connect the charge must
+     * name the shop's connected account — money goes to the shop, never here.
      */
     public function initiate(Order $order, TenantPaymentMethod $method): PaymentInitiation;
 
     /**
-     * Verify and translate an incoming webhook.
+     * Verification is folded in rather than exposed separately, so there is no
+     * way to parse a webhook without checking its signature — an unsigned
+     * webhook is an anonymous request claiming an order was paid, and two
+     * steps would make "forgot to verify" reachable.
      *
-     * Verification is folded into this one method rather than exposed
-     * separately, so there is no way to parse a webhook without having
-     * checked its signature first — an unsigned webhook is just an
-     * anonymous HTTP request claiming an order was paid, and separating
-     * the two steps makes "forgot to verify" a reachable bug.
-     *
-     * Returns null for events this gateway doesn't care about. Providers
-     * send far more event types than any one integration uses, and
-     * ignoring the rest is normal, not an error.
+     * Returns null for events this gateway ignores.
      *
      * @throws \App\Services\Payments\Exceptions\InvalidWebhookSignature
      */

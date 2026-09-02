@@ -4,12 +4,15 @@ namespace App\Services;
 
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\Billing\SubscriptionService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 
 class AuthService
 {
+    public function __construct(private readonly SubscriptionService $subscriptions) {}
+
     /**
      * @return array{0: User, 1: string}
      */
@@ -29,13 +32,9 @@ class AuthService
     }
 
     /**
-     * Self-serve shop signup: creates the Tenant and its first (owner)
-     * User in one transaction, then logs them straight in — a half-created
-     * tenant with no user (or vice versa) isn't a valid state, and asking
-     * a brand-new signup to immediately log in separately would be a
-     * pointless extra step. tenant_id is set explicitly here, not via
-     * BelongsToTenant's auto-fill hook, since there is no tenant bound in
-     * the container yet at this point — the tenant IS what's being
+     * Tenant and owner User in one transaction — a half-created tenant with no
+     * user isn't a valid state. tenant_id is set explicitly, not via
+     * BelongsToTenant's hook: no tenant is bound yet, since it's what's being
      * created.
      *
      * @return array{0: User, 1: string}
@@ -49,6 +48,11 @@ class AuthService
                 'owner_name' => $data['owner_name'],
                 'owner_email' => $data['owner_email'],
                 'owner_phone' => $data['owner_phone'],
+                // Effectively permanent once orders exist — UpdateTenantRequest
+                // refuses it. Defaulted, but settable so a Thai shop isn't
+                // silently trading in Kyat.
+                'currency' => $data['currency'] ?? 'MMK',
+                'timezone' => $data['timezone'] ?? 'Asia/Yangon',
                 'is_active' => true,
             ]);
 
@@ -59,6 +63,12 @@ class AuthService
                 'password' => Hash::make($data['password']),
                 'role' => 'owner',
             ]);
+
+            // Inside the same transaction as the tenant and owner: a shop
+            // with no subscription row is not a valid state either. Every
+            // entitlement gate reads this relation, so a tenant missing it
+            // would be a shop that can neither write nor be billed.
+            $this->subscriptions->startTrial($tenant);
 
             $token = $user->createToken('api-token')->plainTextToken;
 

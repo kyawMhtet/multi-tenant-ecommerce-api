@@ -8,6 +8,8 @@ use App\Models\ProductImage;
 use App\Models\ProductVariant;
 use App\Models\StockMovement;
 use App\Rules\NotReservedSlug;
+use App\Services\Billing\PlanFeature;
+use App\Services\Billing\PlanGate;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
@@ -15,16 +17,11 @@ use Illuminate\Support\Str;
 
 class ProductService
 {
-    public function __construct(private readonly ImageUploadService $imageUploadService) {}
+    public function __construct(
+        private readonly ImageUploadService $imageUploadService,
+        private readonly PlanGate $plans,
+    ) {}
 
-    /**
-     * Builds the tenant's product listing with optional, combinable
-     * filters. No manual tenant_id filtering anywhere below — Product's and
-     * ProductVariant's own BelongsToTenant/TenantScope apply automatically,
-     * including inside the whereHas() sub-queries, since this always runs
-     * with a tenant already bound (behind auth:sanctum + tenant
-     * middleware).
-     */
     public function listProducts(array $filters): \Illuminate\Contracts\Pagination\LengthAwarePaginator
     {
         $query = Product::with('variants.images', 'images');
@@ -32,14 +29,10 @@ class ProductService
         if (! empty($filters['search'])) {
             $search = $filters['search'];
 
-            // Grouped into one closure, not two top-level where()/
-            // orWhereHas() calls: a bare top-level orWhereHas() would OR
-            // against every other filter on the query instead of ANDing
-            // with them, e.g. silently turning category_id=5&search=foo
-            // into "category 5 OR name matches foo". Matches barcode as
-            // well as sku: a POS barcode scanner just types the scanned
-            // value into this same search box and submits it, so an exact
-            // scan needs to resolve a product the same way a typed SKU does.
+            // One closure, not top-level orWhereHas(): a bare one would OR
+            // against every other filter, turning category_id=5&search=foo into
+            // "category 5 OR name matches foo". Barcode is matched too — a POS
+            // scanner types into this same box.
             $query->where(function ($q) use ($search) {
                 $q->where('name', 'like', "%{$search}%")
                     ->orWhereHas('variants', function ($vq) use ($search) {
@@ -65,19 +58,22 @@ class ProductService
     }
 
     /**
-     * Creates a product and its first variant together.
-     *
-     * This is one transaction, not two separate creates, because a Product
-     * with zero variants is an invalid state for this app: every price/SKU/
-     * stock lookup elsewhere assumes at least one variant exists. If the
-     * variant insert failed after the product insert succeeded (a bad SKU,
-     * a dropped connection), we'd be left with a half-formed product that
-     * every other query has to defensively handle. Wrapping both in a
-     * transaction means either the whole thing lands or none of it does.
+     * One transaction: a Product with zero variants is an invalid state here,
+     * since every price/SKU/stock lookup assumes at least one exists.
      */
     public function createProduct(array $data): Product
     {
         return DB::transaction(function () use ($data) {
+            // Counted inside the transaction, not before it: a check outside
+            // would race two concurrent creates straight past the ceiling.
+            // Product::count() is tenant-scoped by the global scope, so this
+            // is this shop's catalogue and no other.
+            //
+            // The limit applies to CREATE only. A shop that drops onto a plan
+            // it already exceeds keeps every product it has — nothing is
+            // deleted or hidden to force an upgrade.
+            $this->plans->ensureWithin('products', Product::count());
+
             $product = Product::create(Arr::except($data, ['variant', 'images']));
 
             $this->addVariant($product, $data['variant']);
@@ -91,16 +87,14 @@ class ProductService
     }
 
     /**
-     * Adds a variant to an existing product, recording any starting stock
-     * on the ledger (stock_movements) rather than only setting the
-     * current_stock counter — current_stock is a denormalized cache, and an
-     * uncounted starting balance would make it impossible to reconcile
-     * stock later. Variant creation and the ledger entry are one
-     * transaction for the same reason createProduct() is: a variant that
-     * claims to have stock with no corresponding movement row is a bug.
+     * Starting stock goes on the ledger, not just the current_stock counter:
+     * that counter is a cache, and an uncounted starting balance makes stock
+     * impossible to reconcile later.
      */
     public function addVariant(Product $product, array $variantData): ProductVariant
     {
+        $this->ensureMayPreorder($variantData);
+
         return DB::transaction(function () use ($product, $variantData) {
             $variant = $this->createVariantRow($product, Arr::except($variantData, ['images']));
 
@@ -115,10 +109,8 @@ class ProductService
                 ]);
             }
 
-            // Last on purpose, same reasoning as createProduct()'s own
-            // addImages() call: addVariantImages() writes files before
-            // their DB rows and can only clean up its own partial
-            // failures, not anything that fails after it.
+            // Last on purpose: it writes files before their DB rows and can
+            // only clean up its own failures, not anything that fails after it.
             if (! empty($variantData['images'])) {
                 $this->addVariantImages($variant, $variantData['images']);
             }
@@ -128,30 +120,16 @@ class ProductService
     }
 
     /**
-     * The ownership check exists for the same reason deleteImage()'s does:
-     * both the {product} and {variant} route parameters resolve
-     * independently — TenantScope already rules out either one belonging
-     * to a different tenant, but nothing ties them to EACH OTHER. Without
-     * this, a tenant could edit variant #5 (really attached to their own
-     * product #12) via a URL naming a different one of their own
-     * products, e.g. /products/3/variants/5 — a same-tenant
-     * URL/resource-mismatch bug, not a cross-tenant leak. 404, not 403,
-     * matching the same belongs-to-someone-else-looks-like-doesn't-exist
-     * choice used everywhere else in this app.
-     *
-     * current_stock is never in $data — UpdateProductVariantRequest
-     * doesn't validate it, so there's nothing here to strip; stock only
-     * ever changes through StockService's ledgered methods.
-     *
-     * Field update, removals, and additions are one transaction, same
-     * reasoning as updateProduct(): a failure partway through must not
-     * leave the field change committed with a removal or addition only
-     * half-applied. addVariantImages() runs last for the same reason
-     * addImages() does on the product side — see that method's docblock.
+     * {product} and {variant} bind independently — TenantScope rules out
+     * either belonging to another tenant, but nothing ties them to EACH
+     * OTHER, so /products/3/variants/5 could edit a variant of product 12.
+     * 404, not 403, like everywhere else here.
      */
     public function updateVariant(Product $product, ProductVariant $variant, array $data): ProductVariant
     {
         abort_unless($variant->product_id === $product->id, 404, 'Variant not found.');
+
+        $this->ensureMayPreorder($data);
 
         return DB::transaction(function () use ($variant, $data) {
             $variant->update(Arr::except($data, ['images', 'remove_image_ids']));
@@ -172,34 +150,13 @@ class ProductService
     }
 
     /**
-     * Product fields plus, optionally, more images to add and/or specific
-     * ones to remove — both act only on what's actually present in
-     * $data, same as the plain field update. Removals are re-fetched
-     * through $product->images() here rather than trusting the ids in
-     * $data directly: UpdateProductRequest already validated each one
-     * belongs to this product, but the service doesn't assume that
-     * check ran or was correct, the same reasoning OrderService
-     * re-fetches cart lines by id instead of trusting validated() alone.
-     * Each removal goes through deleteImage() so that logic (and its
-     * commit-deferred file cleanup) has exactly one implementation, not
-     * two.
+     * Field edits, removals and additions in one transaction, so a client's
+     * "Save changes" can't half-succeed. Removals are re-fetched rather than
+     * trusting the validated ids.
      *
-     * All three steps are one transaction: this now does in one request
-     * what used to be separate, independent endpoints, so a failure in
-     * addImages() (e.g. a corrupt file — see the Pest test for exactly
-     * this) must not leave the field update or a removal already
-     * committed with no way for the caller to know the request only
-     * half-succeeded. addImages() already opens its own DB::transaction
-     * internally; Laravel composes nested calls via a savepoint, not a
-     * separate commit, so this nests safely.
-     *
-     * addImages() runs last on purpose: it writes files before their DB
-     * rows, cleaning up only if ITS OWN loop fails partway (see its own
-     * docblock) — it has no way to undo a write if something else later
-     * in this same transaction fails instead. Since nothing currently
-     * runs after it here, that gap never opens; moving it earlier would
-     * reopen it, so don't reorder these three steps without reconsidering
-     * that.
+     * addImages() runs LAST on purpose: it writes files before their DB rows
+     * and can't undo them if something later in the transaction fails. Don't
+     * reorder these three steps without re-examining that.
      */
     public function updateProduct(Product $product, array $data): Product
     {
@@ -227,31 +184,12 @@ class ProductService
     }
 
     /**
-     * The ownership check (does this image actually belong to this
-     * product?) matters because both route parameters are independently,
-     * implicitly bound — Laravel's tenant scope already guarantees
-     * $image belongs to the current tenant, but not that it belongs to
-     * *this* product. Without it, a tenant could delete image #5 (which
-     * is really attached to their own product #12) via a URL naming a
-     * completely different one of their own products, e.g.
-     * /products/3/images/5. 404, not 403: this is the same "don't
-     * distinguish belongs-to-someone-else from doesn't-exist" choice
-     * used everywhere else in this app.
+     * Ownership check for the same reason as updateVariant()'s.
      *
-     * The row is deleted immediately, but the file only once the
-     * surrounding transaction actually commits (DB::afterCommit()) —
-     * deliberately not a synchronous "delete the file, then the row."
-     * deleteImage() is now only ever called from inside
-     * updateProduct()'s transaction alongside other steps (a field
-     * update, possibly addImages() too); if one of those *other* steps
-     * failed and rolled everything back, a synchronous file delete here
-     * would already be done and wouldn't roll back with it — leaving the
-     * (correctly restored) row pointing at a file that's gone. Deferring
-     * the actual delete until the transaction is known to have committed
-     * keeps the row and its file consistent in every outcome, not just
-     * the successful one. Outside a transaction, afterCommit() just runs
-     * immediately, so this is a strict improvement, not a behavior
-     * change for the case where nothing else in the same call can fail.
+     * The file is deleted via afterCommit, not synchronously: file I/O can't
+     * roll back, so a rollback later in updateProduct()'s transaction would
+     * restore the row while the file it points at stayed gone. This is the
+     * pattern for any non-transactional side effect.
      */
     public function deleteImage(Product $product, ProductImage $image): void
     {
@@ -263,11 +201,7 @@ class ProductService
         DB::afterCommit(fn () => $this->imageUploadService->delete($path));
     }
 
-    /**
-     * Same ownership-check and deferred-file-delete reasoning as
-     * deleteImage() — see its docblock — checked against
-     * product_variant_id instead of product_id.
-     */
+    /** Same reasoning as deleteImage(), keyed on product_variant_id. */
     public function deleteVariantImage(ProductVariant $variant, ProductImage $image): void
     {
         abort_unless($image->product_variant_id === $variant->id, 404, 'Image not found.');
@@ -279,34 +213,20 @@ class ProductService
     }
 
     /**
-     * Stores and optimizes each file (see ImageUploadService), then
-     * records it — sort_order continues from whatever images already
-     * exist, so images added later always sort after earlier ones rather
-     * than colliding at 0.
+     * Row-locked so two concurrent calls can't read the same max(sort_order)
+     * and write colliding values.
      *
-     * Row-locked the same way StockService::deductForSale() locks a
-     * variant: without it, two concurrent calls for the same product
-     * (e.g. two near-simultaneous update requests) could both read the
-     * same max(sort_order) and write colliding values — not a tenant
-     * leak, just a display-order correctness bug, but the fix is the
-     * same shape already established elsewhere in this app.
-     *
-     * File writes aren't part of the DB transaction — they can't be, disk
-     * I/O doesn't roll back — so a later failure in this loop (or
-     * anything else in createProduct()'s outer transaction) would
-     * otherwise leave orphaned files on disk with no DB row pointing at
-     * them once the transaction rolls back. The try/catch exists
-     * specifically to undo those already-written files before
-     * re-throwing, so a rollback can't leave that behind.
+     * File writes can't join the transaction, so the try/catch deletes any
+     * already-written files before re-throwing — otherwise a rollback leaves
+     * orphans on disk with no row pointing at them.
      */
     public function addImages(Product $product, array $files): void
     {
         DB::transaction(function () use ($product, $files) {
             $locked = Product::where('id', $product->id)->lockForUpdate()->firstOrFail();
 
-            // max() returns null (not 0) when the product has no images
-            // yet, and null + 1 in PHP is 1, not 0 — that off-by-one
-            // would skip sort_order 0 entirely on a product's first image.
+            // max() is null on the first image, and null + 1 is 1 — that
+            // off-by-one would skip sort_order 0 entirely.
             $existingMax = $locked->images()->max('sort_order');
             $nextSortOrder = $existingMax === null ? 0 : $existingMax + 1;
 
@@ -334,15 +254,9 @@ class ProductService
     }
 
     /**
-     * Same purpose, locking, and rollback shape as addImages() — see its
-     * docblock — scoped to one variant's own images instead of the
-     * product's general ones. Kept as a separate method rather than a
-     * parameter on addImages(): the two write to different "buckets" (see
-     * Product::images() vs. ProductVariant::images()'s whereNull split),
-     * and one method juggling both would make it easier to accidentally
-     * write a variant photo into the general gallery or vice versa.
-     * product_id is still set alongside product_variant_id — an image is
-     * still "of" the product, just also scoped to one of its variants.
+     * Same shape as addImages(), scoped to one variant. Separate rather than a
+     * flag, since the two write to different buckets and one method juggling
+     * both makes it easy to put a variant photo in the general gallery.
      */
     public function addVariantImages(ProductVariant $variant, array $files): void
     {
@@ -377,31 +291,41 @@ class ProductService
     }
 
     /**
-     * The pre-check in generateVariantSlug() narrows the odds of a
-     * collision but isn't atomic — two concurrent requests could both pass
-     * it with the same candidate before either commits. The unique index
-     * on product_variants.slug is the real backstop, so this retries the
-     * actual insert (not just the pre-check) on a genuine collision at the
-     * database level, catching only that specific failure and re-raising
-     * anything else unchanged.
+     * generateVariantSlug()'s pre-check isn't atomic — two concurrent requests
+     * can pass it with the same candidate. The unique index is the real
+     * backstop, so this retries the INSERT, not just the pre-check.
      */
+    /**
+     * Checked here rather than in the Form Request, because allow_preorder is
+     * one field on a request that does plenty else. A route-level gate would
+     * reject the shop's entire product edit with a billing error; this
+     * refuses only when they actually asked to sell below zero.
+     *
+     * Only a truthy value is gated. Sending allow_preorder=false, or leaving
+     * it out, is always allowed — turning a paid feature OFF must never
+     * require the plan that turned it on, or a downgraded shop would be stuck
+     * with it.
+     */
+    private function ensureMayPreorder(array $variantData): void
+    {
+        if (! empty($variantData['allow_preorder'])) {
+            $this->plans->ensureFeature(PlanFeature::Preorder);
+        }
+    }
+
     private function createVariantRow(Product $product, array $variantData): ProductVariant
     {
         for ($attempt = 0; $attempt < 3; $attempt++) {
             try {
-                // Explicit defaults, not left to the DB column default: an
-                // unset attribute after create() stays null in memory until
-                // the model is re-fetched, so the track_stock check in
-                // addVariant() would silently see null instead of the DB's
-                // true and skip logging any starting stock.
+                // Explicit defaults, not the DB's: an unset attribute stays null
+                // in memory until re-fetched, so addVariant()'s track_stock check
+                // would see null instead of true and skip the ledger row.
                 return $product->variants()->create(array_merge([
                     'track_stock' => true,
                     'current_stock' => 0,
-                    // System-generated, like order_number — never accepted
-                    // from the request, so array_merge's $variantData
-                    // (which never contains a 'slug' key, since
-                    // StoreProductRequest doesn't validate one) can't
-                    // override it.
+                    'allow_preorder' => false,
+                    'preorder_requires_prepayment' => false,
+                    // System-generated, never accepted from request input.
                     'slug' => $this->generateVariantSlug(),
                 ], $variantData));
             } catch (QueryException $e) {
@@ -417,21 +341,13 @@ class ProductService
     }
 
     /**
-     * Random, not name-derived: a slug like "red-cotton-crew-neck-tshirt-l"
-     * is barely shorter than the product name itself and defeats the point
-     * of a short link, plus it goes stale the moment the product is
-     * renamed (a shared link either breaks or silently points at a name
-     * that no longer matches). A short random code stays constant-width
-     * and never needs to change, at the cost of not being human-readable —
-     * an acceptable trade for a link that exists to be pasted into a chat
-     * app, not read aloud.
+     * Random, not name-derived: a name-based slug goes stale the moment the
+     * product is renamed, breaking every link already shared.
      *
-     * Deliberately global, not per-tenant: bypassing TenantScope here is
-     * one of the two sanctioned uses in this app (see CLAUDE.md) — a
-     * uniqueness check scoped to "my tenant" would let two different
-     * tenants land on the same slug, which breaks the public endpoint's
-     * ability to resolve a tenant from the slug alone with no header.
-     * Only TenantScope is stripped (not every global scope), so a
+     * The uniqueness check is deliberately GLOBAL — a sanctioned TenantScope
+     * bypass (see CLAUDE.md). Scoped per tenant, two shops could land on the
+     * same slug, which breaks the public endpoint's ability to resolve a
+     * tenant from the slug alone. Only TenantScope is stripped, so a
      * soft-deleted variant's slug still counts as taken.
      */
     private function generateVariantSlug(): string
@@ -439,12 +355,8 @@ class ProductService
         for ($attempt = 0; $attempt < 3; $attempt++) {
             $candidate = Str::lower(Str::random(8));
 
-            // A reserved word is treated exactly like a uniqueness
-            // collision — just try again, not an error — since this is
-            // system-generated and the caller never sees the rejected
-            // candidate. See NotReservedSlug for why this check exists
-            // even though today's fixed 8-char length makes most reserved
-            // words impossible to hit by chance.
+            // Treated like a collision, not an error: this is
+            // system-generated and the caller never sees the rejected value.
             if (NotReservedSlug::isReserved($candidate)) {
                 continue;
             }

@@ -7,21 +7,15 @@ use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
 
 /**
- * Shop profile update. Partial by design — every field is 'sometimes', and
- * an absent field always means "leave unchanged", never "clear".
+ * Partial by design — an absent field means "leave unchanged", never "clear".
+ *   logo (file)                    -> replaces; old file deleted after commit
+ *   remove_logo: true              -> column nulled
+ *   business_hours: null           -> hours cleared, social_links untouched
+ *   social_links: {facebook: null} -> only that key removed
  *
- * Field semantics:
- *   field absent                      -> unchanged
- *   logo (file)                       -> replaces; old file deleted after commit
- *   remove_logo: true                 -> column nulled; old file deleted after commit
- *   remove_logo: false                -> no-op, deliberately not an error
- *   business_hours: null              -> hours cleared, social_links untouched
- *   social_links: {facebook: null}    -> only facebook removed, other links untouched
- *
- * slug is NOT accepted: changing it silently breaks every previously shared
- * storefront link and any client caching X-Tenant-Slug. currency is NOT
- * accepted either — money columns carry no currency tag, so changing it
- * would retroactively reinterpret every historical order total.
+ * slug is NOT accepted: changing it breaks every shared storefront link.
+ * currency is NOT accepted: money columns carry no currency tag, so changing
+ * it would retroactively reinterpret every historical total.
  */
 class UpdateTenantRequest extends FormRequest
 {
@@ -31,17 +25,12 @@ class UpdateTenantRequest extends FormRequest
     }
 
     /**
-     * Laravel's 'boolean' rule accepts exactly [true, false, 0, 1, '0', '1'] —
-     * the string "true" is NOT in that list. A request carrying a logo is
-     * multipart, and every multipart field arrives as a string, so a raw
-     * remove_logo=true would fail validation. The codebase's other
-     * convention (Rule::in(['0','1','true','false'], used for query-string
-     * filters) is also wrong here: validateIn string-casts its value, and a
-     * real JSON false casts to "", so `remove_logo: false` in a JSON body
-     * would 422. Normalising first means one rule handles JSON booleans and
-     * multipart strings identically. Garbage becomes null, which still
-     * fails 'boolean' (there's no 'nullable'), so it 422s rather than being
-     * silently read as false.
+     * The 'boolean' rule accepts [true, false, 0, 1, '0', '1'] — the STRING
+     * "true" is not in that list, and a request carrying a logo is multipart
+     * where every field arrives as a string. Rule::in(['0','1','true','false'])
+     * is wrong too: validateIn string-casts, and a real JSON false becomes "".
+     * Normalising first handles both. Garbage becomes null, which still fails
+     * 'boolean', so it 422s rather than reading as false.
      */
     protected function prepareForValidation(): void
     {
@@ -53,14 +42,11 @@ class UpdateTenantRequest extends FormRequest
             }
         }
 
-        // A closed day is an empty list. A JSON client sends [] directly,
-        // but multipart has no way to encode an empty array — the closest
-        // is `business_hours[sun]=`, which arrives as "" and is then turned
-        // into null by the global ConvertEmptyStringsToNull middleware.
-        // Without this, a multipart save (i.e. any save that also uploads a
-        // logo) could not express "closed on Sunday" at all. Only per-day
-        // nulls are coerced; a null for business_hours as a WHOLE still
-        // means "clear all hours", which is a different, intentional thing.
+        // A closed day is []. Multipart can't encode an empty array — the
+        // closest is `business_hours[sun]=`, which arrives as "" and becomes
+        // null via ConvertEmptyStringsToNull, so without this no multipart
+        // save could express "closed on Sunday". Only PER-DAY nulls are
+        // coerced; a null for the whole key still means "clear all hours".
         if (is_array($hours = $this->input('business_hours'))) {
             $this->merge([
                 'business_hours' => array_map(fn ($day) => $day ?? [], $hours),
@@ -76,13 +62,19 @@ class UpdateTenantRequest extends FormRequest
             'business_phone' => ['sometimes', 'nullable', 'string', 'max:32'],
             'business_email' => ['sometimes', 'nullable', 'email', 'max:255'],
 
-            // Which fulfillment options this shop offers. Partial like
-            // everything else here, which is what makes the "at least one"
-            // check in after() non-trivial: a request turning delivery off
-            // may not mention pickup at all, so the guard has to consider
-            // the SAVED value for whichever flag wasn't sent.
+            // Editable, unlike currency: changing it only reinterprets
+            // wall-clock opening hours going forward, rewriting no history.
+            'timezone' => ['sometimes', 'timezone'],
+
+            // Partial like everything else, which is what makes the "at least
+            // one" check in after() non-trivial — a request turning delivery
+            // off may not mention pickup at all.
             'allows_delivery' => ['sometimes', 'boolean'],
             'allows_pickup' => ['sometimes', 'boolean'],
+
+            // Editable like timezone: orders snapshot the fee they were
+            // charged, so changes only affect future orders.
+            'delivery_fee' => ['sometimes', 'numeric', 'min:0', 'max:9999999999'],
 
             'logo' => ['sometimes', 'image', 'max:2048'],
             'cover' => ['sometimes', 'image', 'max:2048'],
@@ -93,11 +85,9 @@ class UpdateTenantRequest extends FormRequest
             'remove_logo' => ['sometimes', 'boolean', Rule::prohibitedIf(fn () => $this->hasFile('logo'))],
             'remove_cover' => ['sometimes', 'boolean', Rule::prohibitedIf(fn () => $this->hasFile('cover'))],
 
-            // All seven days required whenever hours are submitted at all,
-            // so "day missing" can never be ambiguous with "closed that day"
-            // — closed is an empty list, the single representation of closed.
-            // Capped at 2 intervals: one row today, split shifts (common
-            // here — many shops close midday) without a migration later.
+            // All seven days required whenever hours are sent at all, so
+            // "missing day" is never ambiguous with "closed". Capped at 2 so
+            // split shifts (common here) need no migration later.
             'business_hours' => ['sometimes', 'nullable', 'array:mon,tue,wed,thu,fri,sat,sun',
                 'required_array_keys:mon,tue,wed,thu,fri,sat,sun'],
             'business_hours.*' => ['array', 'list', 'max:2'],
@@ -107,42 +97,32 @@ class UpdateTenantRequest extends FormRequest
 
             'social_links' => ['sometimes', 'nullable',
                 'array:facebook,instagram,tiktok,telegram,messenger,viber_phone'],
-            // url:https is a security rule, not pedantry: a free string
-            // rendered into an <a href> is stored XSS —
-            // "javascript:alert(document.cookie)" passes a plain string rule
-            // and executes on click on the public storefront.
+            // url:https is security, not pedantry: a free string rendered into
+            // an <a href> is stored XSS — "javascript:alert(1)" passes a plain
+            // string rule and executes on click on the public storefront.
             'social_links.facebook' => ['nullable', 'string', 'max:255', 'url:https'],
             'social_links.instagram' => ['nullable', 'string', 'max:255', 'url:https'],
             'social_links.tiktok' => ['nullable', 'string', 'max:255', 'url:https'],
             'social_links.telegram' => ['nullable', 'string', 'max:255', 'url:https'],
             'social_links.messenger' => ['nullable', 'string', 'max:255', 'url:https'],
-            // Viber is a phone number, not a URL. Keyed _phone so the type
-            // is obvious, stored bare — the frontend builds the
-            // viber://chat?number= link. Storing a scheme-bearing string
-            // here would reintroduce the href problem url:https just closed.
+            // A phone, not a URL — stored bare, the frontend builds the
+            // viber://chat?number= link. A scheme-bearing string here would
+            // reopen the href problem url:https just closed.
             'social_links.viber_phone' => ['nullable', 'string', 'max:32', 'regex:/^[0-9+\-\s()]+$/'],
         ];
     }
 
     /**
-     * close > open can't be expressed with wildcard rules ('after:' can't
-     * reference business_hours.*.0.open), so it's checked here. This is
-     * structural validation of the submitted shape, not business logic, so
-     * the Form Request is the right layer — it keeps TenantService dumb.
-     *
-     * Overnight hours are deliberately unsupported: a shop open past
-     * midnight enters 23:59. Supporting a wrapping interval would force
-     * every consumer to handle it.
+     * close > open can't be expressed with wildcard rules, so it's checked
+     * here. Overnight hours are deliberately unsupported — a shop open past
+     * midnight enters 23:59; a wrapping interval would burden every consumer.
      */
     public function after(): array
     {
         return [
             function (Validator $validator) {
-                // A shop with neither option can't take a storefront order
-                // at all — the checkout would have nothing valid to submit.
-                // Merged against what's already saved, because this is a
-                // partial update: turning delivery off is fine if pickup is
-                // already on, and only the combination is invalid.
+                // Neither option means checkout has nothing valid to submit.
+                // Merged against saved values because this is a partial update.
                 $tenant = app('tenant');
                 $delivery = $this->has('allows_delivery')
                     ? $this->boolean('allows_delivery')

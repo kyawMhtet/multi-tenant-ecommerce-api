@@ -10,16 +10,9 @@ use Illuminate\Contracts\Container\Container;
 use InvalidArgumentException;
 
 /**
- * Resolves the right gateway for a configured payment method.
- *
- * The same shape Laravel uses for its own cache/queue/filesystem drivers
- * (see Illuminate\Filesystem\FilesystemManager): a registry of names to
- * factory closures, resolved on demand. Adding a provider is one entry
- * here plus one class — nothing else in the app changes.
- *
- * Gateways are resolved through the container rather than newed directly,
- * so each one declares its own dependencies (an SDK client, config)
- * normally instead of reaching for globals.
+ * Resolves the gateway for a configured payment method. Adding a provider is
+ * one entry here plus one class. Resolved through the container so each
+ * gateway declares its own dependencies rather than reaching for globals.
  */
 class PaymentGatewayManager
 {
@@ -29,12 +22,9 @@ class PaymentGatewayManager
     public function __construct(private readonly Container $container) {}
 
     /**
-     * A null gateway on the method means there's genuinely no processor —
-     * cash on delivery, bank transfer. Rather than returning null and
-     * making every caller branch on "does this method have a gateway?",
-     * that case resolves to ManualGateway, which implements the same
-     * contract by doing nothing. Callers stay polymorphic; the database
-     * stays honest about the absence.
+     * A null gateway means genuinely no processor. Rather than returning null
+     * and making every caller branch, it resolves to ManualGateway, which
+     * implements the same contract by doing nothing.
      */
     public function for(TenantPaymentMethod $method): PaymentGateway
     {
@@ -44,10 +34,8 @@ class PaymentGatewayManager
     }
 
     /**
-     * Used by the webhook routes, which know their provider from the URL
-     * they're registered at (one endpoint per gateway) rather than from a
-     * tenant's configuration — the webhook arrives before we know which
-     * tenant it concerns.
+     * For webhook routes, which know their provider from the URL rather than
+     * from config — the webhook arrives before we know which tenant it's for.
      */
     public function gateway(string $name): PaymentGateway
     {

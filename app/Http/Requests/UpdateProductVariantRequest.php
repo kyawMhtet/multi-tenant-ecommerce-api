@@ -13,10 +13,9 @@ class UpdateProductVariantRequest extends FormRequest
     }
 
     /**
-     * Same field set as StoreProductVariantRequest, all optional for a
-     * partial update. current_stock is deliberately absent — every stock
-     * change must go through StockService and its ledger (stock_movements),
-     * never a plain field update (see CLAUDE.md's Stock and money section).
+     * Same fields as StoreProductVariantRequest, all optional. current_stock is
+     * deliberately absent: stock only ever changes through StockService's
+     * ledgered methods, never a plain field update.
      */
     public function rules(): array
     {
@@ -34,12 +33,13 @@ class UpdateProductVariantRequest extends FormRequest
             'buying_price' => ['sometimes', 'numeric', 'min:0'],
             'selling_price' => ['sometimes', 'numeric', 'min:0'],
             'track_stock' => ['sometimes', 'boolean'],
+            'allow_preorder' => ['sometimes', 'boolean'],
+            'preorder_lead_time_days' => ['nullable', 'integer', 'min:1', 'max:365'],
+            'preorder_requires_prepayment' => ['sometimes', 'boolean'],
             'low_stock_threshold' => ['nullable', 'numeric', 'min:0'],
             'is_active' => ['sometimes', 'boolean'],
 
-            // Same append-never-replace / fold-removal-into-update
-            // convention as UpdateProductRequest, scoped to this variant's
-            // own images instead of the product's general ones.
+            // Same append-never-replace convention as UpdateProductRequest.
             'images' => ['nullable', 'array', 'max:10'],
             'images.*' => ['image', 'max:2048'],
             'remove_image_ids' => ['nullable', 'array'],

@@ -15,14 +15,10 @@ class PaymentMethodController extends Controller
     public function __construct(private readonly PaymentMethodService $paymentMethods) {}
 
     /**
-     * Every method this app supports, merged with whatever the shop has
-     * configured — not just the configured rows.
-     *
-     * The settings screen needs to render "Cash on delivery [off]"
-     * alongside "QR transfer [on]", and a client that only received
-     * configured rows would have to carry its own copy of the catalogue to
-     * know what else could be switched on. Sending the full list keeps
-     * that knowledge in one place.
+     * The full catalogue merged with what the shop configured, not just the
+     * configured rows: the settings screen needs to render "Cash on delivery
+     * [off]" too, and a client receiving only configured rows would need its
+     * own copy of what else exists.
      */
     public function index(): JsonResponse
     {
@@ -41,10 +37,7 @@ class PaymentMethodController extends Controller
         return PaymentMethodResource::collection($methods)->response();
     }
 
-    /**
-     * Multipart (a QR upload) can't be sent via a real PUT/PATCH, so
-     * clients POST — which suits an upsert anyway.
-     */
+    /** Multipart can't be sent via a real PUT/PATCH, so clients POST. */
     public function upsert(UpsertPaymentMethodRequest $request): JsonResponse
     {
         $method = $this->paymentMethods->upsert($request->validated());

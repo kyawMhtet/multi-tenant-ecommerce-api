@@ -176,3 +176,26 @@ test('a webhook cannot mark a soft-deleted order as paid', function () {
         ->and($raw->payment_status)->toBe('unpaid')
         ->and($raw->status)->not->toBe('paid');
 });
+
+/**
+ * A system cancellation must be as explicable as a human one. Without a
+ * reason the shop opens an order that is simply 'cancelled' and can't tell
+ * an abandoned checkout from something a staff member did.
+ */
+test('an expired payment cancels the order with a recorded reason and no user', function () {
+    [, $order, $variant, $payment] = pendingCardOrder();
+
+    app(WebhookProcessor::class)->process('stripe', new PaymentEvent(
+        type: PaymentEventType::Expired,
+        transactionRef: 'cs_test_ref_1',
+    ));
+
+    $fresh = $order->fresh();
+
+    expect($fresh->status)->toBe('cancelled')
+        ->and($fresh->cancellation_reason)->toBe('payment_expired')
+        ->and($fresh->cancelled_at)->not->toBeNull()
+        // Nobody did this — the null is what marks it automatic.
+        ->and($fresh->cancelled_by)->toBeNull()
+        ->and($variant->fresh()->current_stock)->toEqual(10.0);
+});

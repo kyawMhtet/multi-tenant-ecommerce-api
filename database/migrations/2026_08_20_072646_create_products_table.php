@@ -7,8 +7,6 @@ use Illuminate\Support\Facades\Schema;
 return new class extends Migration
 {
     /**
-     * Run the migrations.
-     *
      * No price/SKU/stock columns here on purpose: those live on product_variants,
      * and every product gets at least one variant even without real options. This
      * keeps price/stock resolution on a single path everywhere (POS, cart, checkout,
@@ -22,16 +20,14 @@ return new class extends Migration
             $table->foreignId('category_id')->nullable()->constrained()->nullOnDelete();
             $table->string('name');
             $table->text('description')->nullable();
-            $table->string('image_path')->nullable();
+            // No image column: photos live in product_images (one-to-many,
+            // sort_order decides the cover). See ImageUploadService.
             $table->boolean('is_active')->default(true);
             $table->timestamps();
             $table->softDeletes();
         });
     }
 
-    /**
-     * Reverse the migrations.
-     */
     public function down(): void
     {
         Schema::dropIfExists('products');

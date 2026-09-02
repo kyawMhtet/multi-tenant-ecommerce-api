@@ -3,18 +3,13 @@
 namespace App\Services\Payments\Data;
 
 /**
- * How the storefront should collect payment for a given method.
+ * How the storefront should collect payment. Only Redirect and None are
+ * produced today — every gateway on the roadmap is redirect-based, which also
+ * keeps card data furthest from our servers.
  *
- * Only Redirect and None are produced today — every gateway on the roadmap
- * (Stripe Checkout, 2C2P's hosted page, MyanMyanPay) is redirect-based,
- * which is also the option that keeps card data furthest from our servers
- * and so keeps PCI scope at its lightest tier.
- *
- * FormPost and ClientToken are declared but unimplemented on purpose: they
- * cost nothing to name, and naming them is what lets the storefront write
- * an exhaustive switch today that won't need restructuring when a gateway
- * eventually requires one. Add the handling when a real provider forces
- * it, not before.
+ * FormPost and ClientToken are named but unimplemented on purpose: naming them
+ * lets the storefront write an exhaustive switch that won't need restructuring
+ * later. Add handling when a provider forces it, not before.
  */
 enum PaymentInitiationType: string
 {

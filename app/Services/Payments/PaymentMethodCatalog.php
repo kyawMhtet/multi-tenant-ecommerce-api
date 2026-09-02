@@ -3,17 +3,11 @@
 namespace App\Services\Payments;
 
 /**
- * The payment methods this application knows how to render and process.
+ * A code constant rather than a table: each entry implies real behaviour the
+ * app has to implement, which a row someone inserts can't supply.
  *
- * Deliberately a code constant rather than a database table. Each entry
- * implies real behaviour — a customer-facing label, which gateway (if any)
- * processes it, whether a QR and proof-of-payment apply — and none of that
- * can be satisfied by a row someone inserts. Adding a method means teaching
- * the app something, so it belongs next to the code that does the teaching.
- *
- * `gateway => null` means no processor: the money moves directly between
- * customer and shop, and a human confirms it. That is the common case for
- * this product's users, not an edge case.
+ * `gateway => null` means no processor — the money moves directly between
+ * customer and shop. That's the common case here, not an edge case.
  */
 class PaymentMethodCatalog
 {
@@ -23,18 +17,21 @@ class PaymentMethodCatalog
             'gateway' => null,
             'supports_qr' => false,
             'supports_proof' => false,
+            'collects_upfront' => false,
         ],
         'qr_transfer' => [
             'label' => 'Bank / wallet transfer (QR)',
             'gateway' => null,
             'supports_qr' => true,
             'supports_proof' => true,
+            'collects_upfront' => true,
         ],
         'card' => [
             'label' => 'Credit or debit card',
             'gateway' => 'stripe',
             'supports_qr' => false,
             'supports_proof' => false,
+            'collects_upfront' => true,
         ],
     ];
 
@@ -63,5 +60,21 @@ class PaymentMethodCatalog
     public static function supportsProof(string $method): bool
     {
         return (bool) (self::METHODS[$method]['supports_proof'] ?? false);
+    }
+
+    /**
+     * Whether the money reaches the shop before it parts with the goods.
+     *
+     * A different question from `gateway`, and the two don't line up:
+     * qr_transfer has no gateway yet is paid up front, while a "pay at pickup"
+     * would be deferred whatever processed it. TIMING, not who handles it.
+     *
+     * Unknown methods are treated as deferred and refused. This gates goods the
+     * shop doesn't have yet, so failing closed is right: a forgotten flag shows
+     * up immediately as a 422, the opposite mistake as an unpaid import.
+     */
+    public static function collectsUpfront(string $method): bool
+    {
+        return (bool) (self::METHODS[$method]['collects_upfront'] ?? false);
     }
 }

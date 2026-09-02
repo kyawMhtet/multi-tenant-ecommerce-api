@@ -146,3 +146,40 @@ test('a disabled method is rejected even though the row still exists', function 
     expect(TenantPaymentMethod::withoutGlobalScopes()->count())->toBe(1)
         ->and(Order::count())->toBe(0);
 });
+
+/**
+ * The compensating-cancellation path, which had no coverage.
+ *
+ * A shop that enabled card payments without finishing Stripe onboarding
+ * makes initiate() throw AFTER the order has already committed and taken
+ * its stock. That rollback must leave a fully explicable order behind —
+ * not one that is simply 'cancelled' with nothing saying why.
+ */
+test('a failed payment start cancels the order with a reason and returns the stock', function () {
+    [$tenant] = makeTenantUser();
+    enablePaymentMethodForTenant($tenant, ['method' => 'card', 'gateway' => 'stripe']);
+    $variant = createProductForTenant($tenant, variantOverrides: ['current_stock' => 10])->variants->first();
+
+    // No stripe_account_id, so StripeGateway::initiate() refuses.
+    expect($tenant->stripe_account_id)->toBeNull();
+
+    $this->withHeader('X-Tenant-Slug', $tenant->slug)
+        ->postJson('/api/v1/public/orders', [
+            'items' => [['product_variant_slug' => $variant->slug, 'quantity' => 3]],
+            'customer_name' => 'Aye Aye',
+            'customer_phone' => '09987654321',
+            'fulfillment_type' => 'delivery',
+            'delivery_address' => ['full_address' => 'No. 5, Yangon'],
+            'payment_method' => 'card',
+        ])->assertStatus(500);
+
+    $order = Order::withoutGlobalScopes()->firstOrFail();
+
+    expect($order->status)->toBe('cancelled')
+        ->and($order->cancellation_reason)->toBe('payment_initiation_failed')
+        ->and($order->cancelled_at)->not->toBeNull()
+        // Nobody did this — the gateway was unreachable.
+        ->and($order->cancelled_by)->toBeNull()
+        // And critically, the stock came back rather than being stranded.
+        ->and($variant->fresh()->current_stock)->toEqual(10.0);
+});

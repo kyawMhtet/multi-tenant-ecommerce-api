@@ -12,30 +12,16 @@ use Illuminate\Support\Facades\Auth;
 class OrderSeeder extends Seeder
 {
     /**
-     * Attaches order history to the tenant/products the earlier seeders
-     * already created — looked up, never created here, same reasoning as
-     * ProductSeeder.
+     * Routed through OrderService, never a raw Order::create(), so stock is
+     * actually deducted and a stock_movements row written per line — a sales
+     * history that didn't move stock wouldn't exercise the dashboard at all.
      *
-     * Routed through OrderService (never a raw Order::create()) so
-     * StockService actually deducts current_stock and writes a real
-     * stock_movements row per line — a "sales history" that didn't
-     * actually move stock wouldn't exercise anything a dashboard built on
-     * top of it needs to prove out.
+     * Carbon::setTestNow() is what makes created_at and order_number's embedded
+     * date reflect the intended day rather than when the seeder ran.
      *
-     * Dates are simulated with Carbon::setTestNow(), which is what makes
-     * order_number's embedded date, and every row's created_at, reflect
-     * the intended day rather than the moment the seeder actually ran.
-     *
-     * The bound 'tenant', Auth::login() state, and frozen time are all
-     * cleaned up in a finally block, not just "at the end" — if any
-     * iteration throws (e.g. a bad quantity tripping InsufficientStockException),
-     * an unguarded cleanup line after the loop would simply never run,
-     * leaving 'tenant' dangling in the container. TenantScope checks
-     * app()->bound('tenant') before falling back to
-     * auth()->user()?->tenant_id, so a leaked binding would silently
-     * redirect every tenant-scoped query in the rest of that process to
-     * "test-shop" — harmless only by coincidence of DatabaseSeeder
-     * currently calling this last.
+     * Cleanup is in a finally block, not just after the loop: a throw would
+     * leave 'tenant' dangling in the container, silently redirecting every
+     * tenant-scoped query in the rest of the process to "test-shop".
      */
     public function run(): void
     {
@@ -56,56 +42,58 @@ class OrderSeeder extends Seeder
             $orderService = app(OrderService::class);
             $created = [];
 
-            // Captured once, before any setTestNow() call: computing each
-            // order's date from Carbon::now() inside the loop would
-            // compound on the PREVIOUS iteration's already-frozen time
-            // (setTestNow makes now() keep returning that frozen
-            // instant), so daysAgo offsets would stack instead of each
-            // being relative to the real current date — nothing would
-            // ever land on actual "today".
+            // Captured before any setTestNow(): computing dates from now()
+            // inside the loop would compound on the previous iteration's frozen
+            // time, so daysAgo offsets would stack and nothing land on today.
             $realNow = Carbon::now();
 
             foreach ($orders as $definition) {
                 Carbon::setTestNow($realNow->copy()->subDays($definition['daysAgo'])->setTime($definition['hour'], $definition['minute'] ?? 0));
 
-                $items = collect($definition['items'])->map(fn (array $item) => [
+                // The two paths key cart lines differently: POS by id, the
+                // storefront by slug, since a variant's id is never public.
+                // One shape for both silently produced empty lines.
+                $posItems = collect($definition['items'])->map(fn (array $item) => [
                     'product_variant_id' => $variants[$item['sku']]->id,
                     'quantity' => $item['quantity'],
                 ])->all();
 
+                $onlineItems = collect($definition['items'])->map(fn (array $item) => [
+                    'product_variant_slug' => $variants[$item['sku']]->slug,
+                    'quantity' => $item['quantity'],
+                ])->all();
+
                 if ($definition['source'] === 'pos') {
-                    // A real POS sale always has a cashier; log in for
-                    // the duration of this one call so cashier_id and
-                    // the resulting stock_movements.created_by are
-                    // populated realistically, then log back out
-                    // immediately — online orders below must not
-                    // inherit this.
+                    // A real POS sale has a cashier. Logged out immediately
+                    // after so online orders don't inherit it.
                     Auth::login($owner);
-                    $order = $orderService->createPosOrder(['items' => $items]);
+                    $order = $orderService->createPosOrder(['items' => $posItems]);
                     Auth::logout();
                 } else {
                     $order = $orderService->createOnlineOrder([
-                        'items' => $items,
+                        'items' => $onlineItems,
                         'customer_name' => $definition['customerName'],
                         'customer_phone' => $definition['customerPhone'],
+                        // COD needs no gateway and carries most of the real
+                        // volume, so seeded data reflects the common case.
+                        'payment_method' => 'cod',
+                        'fulfillment_type' => 'delivery',
+                        'delivery_address' => ['full_address' => $definition['address'] ?? 'No. 12, Insein Road, Yangon'],
                     ]);
                 }
 
-                // Simulates order lifecycle progression after creation —
-                // not a raw stock/ledger shortcut, just the status
-                // labels a real fulfillment process would have applied
-                // over the following days. A "cancelled" order here
-                // deliberately does NOT restore stock: this app has no
-                // restock/return flow built yet (see CLAUDE.md —
-                // StockService only has deductForSale so far), so a
-                // cancelled seeded order is stock that left the shelf
-                // for a sale that fell through, exactly like an
-                // un-restocked real cancellation would be until that
-                // feature exists.
+                // Cancellation goes through the real cancelOrder(), not a raw
+                // status write, so seeded cancellations carry a reason, an audit
+                // trail and a return_in row like real ones — otherwise the
+                // dashboard's refund and backlog cards would read wrong.
                 if (($definition['markPaid'] ?? false)) {
                     $order->update(['status' => 'paid', 'payment_status' => 'paid']);
                 } elseif (($definition['markCancelled'] ?? false)) {
-                    $order->update(['status' => 'cancelled']);
+                    $orderService->cancelOrder(
+                        $order,
+                        ['cancellation_reason' => $definition['cancellationReason'] ?? 'customer_cancelled'],
+                        $owner->id,
+                    );
                 }
 
                 $created[] = $order->fresh();

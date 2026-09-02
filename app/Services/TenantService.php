@@ -11,13 +11,11 @@ use Throwable;
 class TenantService
 {
     /**
-     * Explicitly allowlisted plain columns. Defence-in-depth behind
-     * UpdateTenantRequest's whitelist: the service builds its update array
-     * by hand anyway (it has to compute logo_path from an upload and merge
-     * settings), so naming the fields costs nothing and means a future
-     * loosening of validation can't reach slug, is_active or currency.
+     * Defence-in-depth behind UpdateTenantRequest's whitelist — the service
+     * builds this array by hand anyway, so naming the fields costs nothing and
+     * means loosened validation can't reach slug, is_active or currency.
      */
-    private const PROFILE_FIELDS = ['name', 'address', 'business_phone', 'business_email', 'allows_delivery', 'allows_pickup'];
+    private const PROFILE_FIELDS = ['name', 'address', 'business_phone', 'business_email', 'timezone', 'allows_delivery', 'allows_pickup', 'delivery_fee'];
 
     /**
      * Keys this service owns inside the shared settings JSON blob.
@@ -27,27 +25,18 @@ class TenantService
     public function __construct(private readonly ImageUploadService $imageUploadService) {}
 
     /**
-     * The row is re-fetched with lockForUpdate() for two reasons, both the
-     * same shape as ProductService::addImages()'s lock: the settings merge
-     * below is a read-modify-write (two concurrent PATCHes would otherwise
-     * both read the pre-state and last-writer-wins would drop one key), and
-     * it guarantees a trustworthy read of the old image paths before they're
-     * overwritten.
+     * lockForUpdate() because the settings merge is a read-modify-write: two
+     * concurrent PATCHes would otherwise both read the pre-state and one key
+     * would be lost.
      *
-     * File ordering, mirroring addImages()/deleteImage():
-     *   - New files are written BEFORE the DB update, and the catch block
-     *     deletes them on any failure — disk I/O can't roll back, so
-     *     without that a rollback would strand orphaned files.
-     *   - Old files are deleted only via DB::afterCommit, and only after
-     *     update() has already succeeded. Registering them earlier would
-     *     be worse than useless: outside a transaction afterCommit() fires
-     *     immediately, so a speculative registration would delete a live
-     *     file on a later failure.
+     * File ordering: new files are written BEFORE the update and deleted by
+     * the catch on any failure; old files only via afterCommit, AFTER update()
+     * succeeded. Registering the delete earlier is worse than useless —
+     * outside a transaction afterCommit fires immediately.
      *
-     * The residual risk is deliberately one-directional. If the commit
-     * itself fails after the try block exits, a newly written file is
-     * orphaned — wasted bytes. What can never happen is a committed row
-     * pointing at a file that's already gone. Same bias as addImages().
+     * The residual risk is one-directional on purpose: a failed commit orphans
+     * a new file (wasted bytes), but a committed row can never point at a file
+     * that's already gone.
      */
     public function update(Tenant $tenant, array $data): Tenant
     {
@@ -101,17 +90,10 @@ class TenantService
     }
 
     /**
-     * Merges only this service's own keys into the existing settings blob
-     * rather than replacing it — settings is a shared bucket, and a future
-     * unrelated feature storing e.g. settings.receipt_footer must not be
-     * silently wiped by a shop-profile save.
-     *
-     * Social platform keys merge individually too, so a client can clear one
-     * link (facebook: null) without resending the rest. Null/empty values are
-     * stripped rather than stored, so the JSON never accumulates tombstones.
-     *
-     * Returns null when the request touched neither key, so the caller can
-     * leave settings entirely alone.
+     * Merges rather than replaces: settings is a shared bucket, and a future
+     * feature storing settings.receipt_footer must not be wiped by a profile
+     * save. Platform keys merge individually so a client can clear one link
+     * without resending the rest. Nulls are stripped, never stored.
      */
     private function mergedSettings(Tenant $tenant, array $data): ?array
     {

@@ -13,14 +13,9 @@ class UpdateProductRequest extends FormRequest
     }
 
     /**
-     * Product fields, plus optionally more images (appended, never
-     * replacing existing ones) and/or specific images to remove — both
-     * only ever act on what's actually present in this one request, same
-     * as every other field here ('sometimes'/'nullable', never assumed).
-     * Editing a variant's price or stock touches margin reporting and
-     * the stock ledger, which deserves its own dedicated endpoint rather
-     * than being folded into a generic "update product" request — see
-     * ProductService for details.
+     * Images are APPENDED, never replaced. Variant price and stock aren't here:
+     * they touch margin reporting and the stock ledger, so they get their own
+     * endpoints rather than folding into a generic product update.
      */
     public function rules(): array
     {
@@ -34,12 +29,9 @@ class UpdateProductRequest extends FormRequest
             }],
             'images' => ['nullable', 'array', 'max:10'],
             'images.*' => ['image', 'max:2048'],
-            // Each id must belong to *this* product specifically, not
-            // just this tenant — $this->route('product') is already
-            // tenant-scoped by route-model binding, so ->images() (a
-            // plain child relation) is the precise check: it rejects an
-            // id belonging to another of this tenant's own products the
-            // same way it rejects one belonging to another tenant's.
+            // Must belong to THIS product, not just this tenant: ->images() on
+            // the already-scoped route model rejects an id from another of the
+            // tenant's own products too.
             'remove_image_ids' => ['nullable', 'array'],
             'remove_image_ids.*' => ['integer', function ($attribute, $value, $fail) {
                 if (! $this->route('product')->images()->whereKey($value)->exists()) {

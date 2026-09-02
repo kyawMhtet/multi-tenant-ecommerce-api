@@ -6,19 +6,13 @@ use Closure;
 use Illuminate\Contracts\Validation\ValidationRule;
 
 /**
- * Guards a product_variant slug against colliding with a path segment the
- * storefront frontend needs at its own root — once product pages live at
- * something like /{slug}, a product slug of "cart" or "admin" would be
- * ambiguous with the real cart/admin route, not just an ugly URL.
+ * Stops a slug colliding with a path the storefront needs at its own root:
+ * with product pages at /{slug}, a slug of "cart" is ambiguous with the real
+ * cart route, not just ugly.
  *
- * Not length-aware on purpose. Today's slugs are a fixed 8-character
- * random code (see ProductService::generateVariantSlug()), so most of
- * these words could never collide by chance under the current scheme —
- * but hard-coding that assumption into this check would make it silently
- * useless the moment slug generation changes (a different length, or an
- * admin-editable "vanity slug" field, which is the scenario this really
- * guards against: a shop owner deliberately typing "checkout" as their
- * own product's slug).
+ * Not length-aware on purpose. Today's 8-char random slugs could never hit
+ * these by chance, but baking that in would make the check useless the moment
+ * a vanity-slug field lets an owner type "checkout" deliberately.
  */
 class NotReservedSlug implements ValidationRule
 {
@@ -35,11 +29,8 @@ class NotReservedSlug implements ValidationRule
         // Framework / infra paths that must never be shadowed
         'static', 'assets', 'public', 'storage', 'favicon', 'robots', 'sitemap',
 
-        // Hostname labels that can't be a tenant subdomain. Only relevant
-        // since this rule now also guards tenant slugs (which become
-        // storefront subdomains), not just product slugs — 'www' already
-        // routes to the admin app, and the rest are conventional
-        // infrastructure hostnames a shop must never be able to claim.
+        // Hostname labels a tenant subdomain must never claim — this rule also
+        // guards tenant slugs, which become storefront subdomains.
         'www', 'mail', 'ftp', 'smtp', 'ns1', 'ns2', 'cdn', 'status',
     ];
 

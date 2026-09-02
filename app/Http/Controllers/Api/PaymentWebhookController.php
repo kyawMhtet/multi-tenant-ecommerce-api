@@ -16,21 +16,16 @@ class PaymentWebhookController extends Controller
     ) {}
 
     /**
-     * One route per gateway, so the provider is known from the URL rather
-     * than sniffed from the payload — signature schemes differ completely
-     * between providers, and a shared endpoint would mean every gateway's
-     * parsing bugs share a blast radius.
+     * One route per gateway, so the provider is known from the URL rather than
+     * sniffed from the payload — signature schemes differ completely, and a
+     * shared endpoint would give every gateway's parsing bugs one blast radius.
      *
-     * Deliberately outside both 'auth:sanctum' and 'tenant': this is a
-     * server-to-server call with no user and no X-Tenant-Slug header. The
-     * signature check inside the gateway IS the authentication, which is
-     * why parseWebhook() verifies and parses as one inseparable step.
+     * Outside both 'auth:sanctum' and 'tenant': there's no user and no header
+     * on a server-to-server call. The signature check IS the authentication.
      *
-     * Always 200 once the signature is valid, even when the event is
-     * ignored. A non-2xx tells the provider to retry, and there is nothing
-     * to gain from retrying an event we've deliberately chosen not to act
-     * on — that just turns a no-op into repeated traffic. Genuine
-     * signature failures still surface as 400 via InvalidWebhookSignature.
+     * Always 200 once the signature is valid, even for ignored events: a
+     * non-2xx just makes the provider retry a no-op. Signature failures still
+     * surface as 400.
      */
     public function handle(Request $request, string $gateway)
     {

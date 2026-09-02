@@ -12,21 +12,17 @@ use Illuminate\Support\Facades\DB;
 class StockService
 {
     /**
-     * Deducts stock for a sale and logs it on the ledger.
+     * The lockForUpdate() re-fetch is the point: two concurrent sales could
+     * otherwise both read current_stock = 1, both decide there's enough, and
+     * sell the same last unit twice. The tenant scope stays ACTIVE here — the
+     * caller already resolved the variant under it, so this is a targeted
+     * re-fetch for locking, not a bypass.
      *
-     * Re-fetches the variant with lockForUpdate() rather than trusting the
-     * instance passed in: two concurrent sales of the same variant could
-     * otherwise both read current_stock = 1, both decide there's enough,
-     * and both deduct — selling the same last unit twice. The row lock
-     * forces the second transaction to wait until the first commits (or
-     * rolls back), so it re-checks against the real post-deduction balance.
-     * This is the one place CLAUDE.md allows bypassing the ambient
-     * tenant-scoped query in favor of an explicit id lookup — the variant
-     * was already resolved (and tenant-checked) by the caller, so this is
-     * a targeted re-fetch for locking, not a way to skip tenant scoping.
-     *
-     * Untracked variants (track_stock = false, e.g. made-to-order items)
-     * have nothing to decrement or reconcile, so they're a no-op here.
+     * allow_preorder lifts the sufficiency check and lets current_stock go
+     * negative. That IS the preorder mechanism: -7 means 7 units sold and
+     * owed, receivePurchase() brings it back with no special case, and every
+     * movement keeps a coherent balance_after. It's a permission, not a mode —
+     * a preorder variant WITH stock deducts normally.
      */
     public function deductForSale(ProductVariant $variant, float $quantity, ?Model $reference = null): ProductVariant
     {
@@ -37,7 +33,7 @@ class StockService
                 return $locked;
             }
 
-            if ($locked->current_stock < $quantity) {
+            if (! $locked->allow_preorder && $locked->current_stock < $quantity) {
                 throw new InsufficientStockException($locked, $quantity);
             }
 
@@ -59,23 +55,10 @@ class StockService
     }
 
     /**
-     * The ownership check is the same reason updateVariant()'s exists in
-     * ProductService — {product} and {variant} route parameters resolve
-     * independently, so nothing else ties this variant to the product
-     * named in the URL.
-     *
-     * unit_cost, when given, both logs the actual price paid on this
-     * delivery (the ledger is the permanent, per-batch record — see
-     * CLAUDE.md on snapshotting unit_cost rather than trusting today's
-     * price) AND updates the variant's own buying_price, so future sales'
-     * margin is measured against the real replacement cost rather than a
-     * stale one. When omitted (the caller doesn't know/didn't record this
-     * batch's cost), buying_price is left untouched and the movement's
-     * own unit_cost stays null — never guessed from the old buying_price.
-     *
-     * Same row-lock as deductForSale() and the same reasoning: two
-     * concurrent restocks of the same variant must not both read a stale
-     * current_stock and stomp on each other's increment.
+     * unit_cost, when given, logs what this batch actually cost AND updates
+     * buying_price, so future margin is measured against real replacement
+     * cost. When omitted it's left null rather than guessed from the old
+     * price. Same row-lock reasoning as deductForSale().
      */
     public function receivePurchase(Product $product, ProductVariant $variant, float $quantity, ?float $unitCost = null, ?string $note = null): ProductVariant
     {
@@ -101,13 +84,8 @@ class StockService
     }
 
     /**
-     * Credits stock back for a cancelled order, logged as 'return_in' —
-     * distinct from 'purchase' (new stock coming in from a supplier) even
-     * though both increment the same counter, because they mean different
-     * things when reconciling the ledger later. Untracked variants
-     * (track_stock = false) are a no-op, same as deductForSale() — nothing
-     * to reconcile for a variant with no meaningful stock count. Same
-     * row-lock/re-fetch reasoning as the other two StockService methods.
+     * Logged as 'return_in', distinct from 'purchase': both increment the same
+     * counter but mean different things when reconciling the ledger later.
      */
     public function returnStock(ProductVariant $variant, float $quantity, ?Model $reference = null): ProductVariant
     {

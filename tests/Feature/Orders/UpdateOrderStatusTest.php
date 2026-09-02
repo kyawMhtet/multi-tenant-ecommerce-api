@@ -16,8 +16,14 @@ test('updates order status and payment_status', function () {
         ->assertJsonPath('data.status', 'completed')
         ->assertJsonPath('data.payment_status', 'paid');
 
+    // Refunding is its own action now — it records who and when, which a
+    // generic status edit can't, so PATCH deliberately no longer accepts it.
     $this->withHeader('Authorization', "Bearer {$token}")
         ->patchJson("/api/v1/orders/{$order->id}", ['payment_status' => 'refunded'])
+        ->assertStatus(422);
+
+    $this->withHeader('Authorization', "Bearer {$token}")
+        ->postJson("/api/v1/orders/{$order->id}/refund")
         ->assertOk()
         ->assertJsonPath('data.status', 'completed')
         ->assertJsonPath('data.payment_status', 'refunded');
@@ -37,7 +43,7 @@ test('cancelling an order restores stock via a return_in movement', function () 
     $token = $user->createToken('t')->plainTextToken;
 
     $this->withHeader('Authorization', "Bearer {$token}")
-        ->patchJson("/api/v1/orders/{$order->id}", ['status' => 'cancelled'])
+        ->postJson("/api/v1/orders/{$order->id}/cancel", ['cancellation_reason' => 'out_of_stock'])
         ->assertOk()
         ->assertJsonPath('data.status', 'cancelled');
 
@@ -65,7 +71,7 @@ test('cancelling an order does not restore stock for untracked variants', functi
     $token = $user->createToken('t')->plainTextToken;
 
     $this->withHeader('Authorization', "Bearer {$token}")
-        ->patchJson("/api/v1/orders/{$order->id}", ['status' => 'cancelled'])
+        ->postJson("/api/v1/orders/{$order->id}/cancel", ['cancellation_reason' => 'out_of_stock'])
         ->assertOk();
 
     expect((float) $variant->fresh()->current_stock)->toBe(0.0)
@@ -83,14 +89,14 @@ test('cancelling an already-cancelled order does not double-restore stock', func
     $token = $user->createToken('t')->plainTextToken;
 
     $this->withHeader('Authorization', "Bearer {$token}")
-        ->patchJson("/api/v1/orders/{$order->id}", ['status' => 'cancelled'])
+        ->postJson("/api/v1/orders/{$order->id}/cancel", ['cancellation_reason' => 'out_of_stock'])
         ->assertOk();
 
     expect($variant->fresh()->current_stock)->toEqual(10.0);
 
     // Same order, cancelled again — must not credit stock a second time.
     $this->withHeader('Authorization', "Bearer {$token}")
-        ->patchJson("/api/v1/orders/{$order->id}", ['status' => 'cancelled'])
+        ->postJson("/api/v1/orders/{$order->id}/cancel", ['cancellation_reason' => 'out_of_stock'])
         ->assertOk();
 
     expect($variant->fresh()->current_stock)->toEqual(10.0)

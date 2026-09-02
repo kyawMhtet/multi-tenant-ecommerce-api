@@ -26,6 +26,11 @@ class OrderItemResource extends JsonResource
             'sku' => $this->sku,
             'attributes' => $this->attributes,
             'quantity' => $this->quantity,
+            // Snapshotted at sale time, so a receipt reprinted months later
+            // still shows what this customer was told when they paid, even
+            // if the variant is back in stock or the lead time has changed.
+            'is_preorder' => $this->is_preorder,
+            'preorder_lead_time_days' => $this->preorder_lead_time_days,
             'unit_price' => $this->unit_price,
             'line_total' => $this->line_total,
         ];

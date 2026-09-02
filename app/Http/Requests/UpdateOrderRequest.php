@@ -13,17 +13,19 @@ class UpdateOrderRequest extends FormRequest
     }
 
     /**
-     * status/payment_status only — everything else about an order
-     * (items, totals, source) is fixed at creation time and snapshotted;
-     * changing them after the fact isn't a "status update," it's rewriting
-     * history. Same enum values as IndexOrderRequest's status filter and
-     * the orders migration.
+     * status/payment_status only — items, totals and source are snapshotted at
+     * creation, and changing them isn't a status update, it's rewriting history.
      */
     public function rules(): array
     {
         return [
-            'status' => ['sometimes', Rule::in(['pending', 'paid', 'processing', 'completed', 'cancelled', 'refunded'])],
-            'payment_status' => ['sometimes', Rule::in(['unpaid', 'partial', 'paid', 'refunded'])],
+            // 'cancelled' and 'refunded' are deliberately NOT settable: both
+            // carry required inputs, an audit trail and side effects a generic
+            // field edit can't enforce. Leaving them here would be a second,
+            // weaker path to the same state with no reason recorded.
+            // Use POST /orders/{order}/cancel and /refund.
+            'status' => ['sometimes', Rule::in(['pending', 'paid', 'processing', 'completed'])],
+            'payment_status' => ['sometimes', Rule::in(['unpaid', 'partial', 'paid'])],
         ];
     }
 }

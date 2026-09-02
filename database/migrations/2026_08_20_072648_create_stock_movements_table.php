@@ -7,12 +7,9 @@ use Illuminate\Support\Facades\Schema;
 return new class extends Migration
 {
     /**
-     * Run the migrations.
-     *
-     * This table is an append-only ledger, not a mutable counter: current_stock on
-     * product_variants is just a denormalized cache for fast reads. Every stock
-     * change is recorded here with its resulting balance so the count can always
-     * be reconciled and traced back to the purchase/sale/adjustment that caused it.
+     * An append-only ledger, not a counter: product_variants.current_stock is a
+     * denormalized cache. Every change is recorded with its resulting balance so
+     * the count can be reconciled and traced back to what caused it.
      */
     public function up(): void
     {
@@ -32,9 +29,6 @@ return new class extends Migration
         });
     }
 
-    /**
-     * Reverse the migrations.
-     */
     public function down(): void
     {
         Schema::dropIfExists('stock_movements');

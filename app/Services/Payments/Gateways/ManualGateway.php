@@ -10,15 +10,11 @@ use App\Services\Payments\Data\PaymentInitiation;
 use Illuminate\Http\Request;
 
 /**
- * Methods with no processor behind them: cash on delivery, bank transfer
- * against a screenshot. For Myanmar, cash on delivery is likely to be the
- * highest-volume method, so this isn't an edge case — it's the common path.
+ * Methods with no processor: cash on delivery, bank transfer against a
+ * screenshot. Likely the highest-volume path here, not an edge case.
  *
  * A real class implementing the same contract, rather than null-checks
- * scattered through the checkout flow. The order is created unpaid and
- * simply waits for a human to confirm the money arrived, which the existing
- * PATCH /orders/{order} endpoint already handles by updating
- * payment_status.
+ * scattered through checkout. The order waits unpaid for a human to confirm.
  */
 class ManualGateway implements PaymentGateway
 {
@@ -27,11 +23,7 @@ class ManualGateway implements PaymentGateway
         return PaymentInitiation::none();
     }
 
-    /**
-     * Nothing ever calls this — no provider exists to send a webhook, and
-     * no route is registered for one. Present because the contract requires
-     * it, returning null in keeping with "this event isn't interesting".
-     */
+    /** Never called: no provider exists to send a webhook. */
     public function parseWebhook(Request $request): ?PaymentEvent
     {
         return null;

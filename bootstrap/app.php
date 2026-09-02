@@ -15,6 +15,16 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'tenant' => \App\Http\Middleware\ResolveTenant::class,
+            // Lapsed-subscription lockout. Applied to catalogue and config
+            // WRITES only — never to orders, the storefront or billing. See
+            // RequireWriteAccess for why each exclusion is deliberate.
+            'subscription' => \App\Http\Middleware\RequireWriteAccess::class,
+            // Route-level plan gate: 'plan:profit_reports'.
+            'plan' => \App\Http\Middleware\RequirePlanFeature::class,
+            // Platform staff, not shop staff. Asserts the Sanctum token
+            // belongs to a PlatformAdmin — auth:sanctum alone does not,
+            // because tokens are polymorphic.
+            'platform' => \App\Http\Middleware\EnsurePlatformAdmin::class,
         ]);
 
         // Laravel 13's default 'api' group ships without throttle:api —
@@ -35,10 +45,19 @@ return Application::configure(basePath: dirname(__DIR__))
         // unauthenticated route (e.g. storefront) that uses implicit
         // binding. Forcing this order closes that gap at the root instead
         // of relying on that coincidence.
+        // Both billing gates read app('tenant'), so both MUST run after
+        // ResolveTenant has bound it. Listing them here states that
+        // dependency explicitly rather than relying on the order they happen
+        // to appear in a route group — a non-prioritised middleware keeps
+        // only its position relative to other non-prioritised ones, which is
+        // a guarantee about the wrong thing.
         $middleware->priority([
             \Illuminate\Auth\Middleware\Authenticate::class,
             \App\Http\Middleware\ResolveTenant::class,
             \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            \App\Http\Middleware\RequireWriteAccess::class,
+            \App\Http\Middleware\RequirePlanFeature::class,
+            \App\Http\Middleware\EnsurePlatformAdmin::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

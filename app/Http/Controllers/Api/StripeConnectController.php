@@ -11,12 +11,8 @@ class StripeConnectController extends Controller
     public function __construct(private readonly StripeConnectService $connect) {}
 
     /**
-     * Whether this shop can accept card payments yet, asked of Stripe
-     * live rather than read from a local flag — see the service for why.
-     *
-     * Takes no parameter: the tenant is app('tenant'), derived by
-     * ResolveTenant from the authenticated user, so there's no input a
-     * caller could supply to inspect another shop's account.
+     * Takes no parameter: the tenant is app('tenant'), derived from the
+     * authenticated user, so there's no input that could name another shop.
      */
     public function status(): JsonResponse
     {
@@ -24,16 +20,11 @@ class StripeConnectController extends Controller
     }
 
     /**
-     * Starts (or resumes) Stripe-hosted onboarding.
+     * Returns a URL rather than issuing a redirect — a separate Next.js app
+     * controls its own navigation.
      *
-     * Returns a URL for the client to redirect to rather than issuing a
-     * redirect itself: this is a JSON API consumed by a separate Next.js
-     * admin app, which needs to control the navigation.
-     *
-     * Both URLs point back at the admin settings page. return_url is where
-     * Stripe sends the owner when they finish OR abandon — it is NOT proof
-     * of success, so that page must re-check status() rather than assume
-     * the shop is now connected.
+     * return_url is where Stripe sends the owner whether they finish OR
+     * abandon. It is NOT proof of success: that page must re-check status().
      */
     public function link(): JsonResponse
     {

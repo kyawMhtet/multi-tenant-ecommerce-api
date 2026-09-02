@@ -23,41 +23,23 @@ class WebhookProcessor
     public function __construct(private readonly OrderService $orderService) {}
 
     /**
-     * Finds the pending payment this event refers to, then applies it.
+     * A webhook carries neither a token nor an X-Tenant-Slug header, so no
+     * tenant is bound — it's DERIVED from whichever transaction_ref resolves.
+     * That's a sanctioned TenantScope bypass (see CLAUDE.md), and it doesn't
+     * widen exposure: transaction_ref is provider-generated, recorded by us,
+     * and the signature check means only the provider can present one.
      *
-     * The TenantScope bypass is unavoidable here and is a third sanctioned
-     * case alongside the two CLAUDE.md already documents: a webhook is a
-     * server-to-server call with no authenticated user and no
-     * X-Tenant-Slug header, so no tenant is bound when this runs — the
-     * tenant is *derived* from whichever transaction reference resolves,
-     * rather than being known up front. Crucially the bypass is precise
-     * (withoutGlobalScope(TenantScope::class)), never the blanket
-     * withoutGlobalScopes(): Order is soft-deletable, and the blanket form
-     * would also strip SoftDeletingScope and let a deleted order be
-     * resurrected and marked paid.
+     * Precise bypass, never withoutGlobalScopes() — Order is soft-deletable,
+     * and the blanket form would let a replayed webhook resurrect a deleted
+     * order and mark it paid.
      *
-     * This does NOT widen cross-tenant exposure, because the lookup key is
-     * not attacker-chosen: transaction_ref is a provider-generated id
-     * recorded by us when the session was created, and the surrounding
-     * signature check means only the provider can present one.
+     * Idempotency comes from the (gateway, transaction_ref) unique index plus
+     * the lock: providers redeliver routinely, so a repeat must be a no-op.
+     * The already-resolved check happens AFTER the lock — before it, two
+     * simultaneous deliveries could both read 'pending'.
      *
-     * The lookup is by (gateway, transaction_ref) — the same pair the
-     * payments table has a unique index on — which is what makes the whole
-     * thing idempotent. Providers redeliver webhooks routinely (a timeout,
-     * a retry, an operator replaying an event), so "the same event arriving
-     * twice" is normal traffic rather than an error, and must not produce a
-     * second payment or a second stock movement.
-     *
-     * The row is locked and re-read inside the transaction, and the
-     * already-resolved check happens after that lock. Checking before it
-     * would leave a real race: two simultaneous deliveries could both read
-     * status='pending' and both proceed.
-     *
-     * An unrecognised reference is logged and ignored rather than thrown.
-     * It genuinely happens — a session created against a different
-     * environment sharing the same webhook endpoint, say — and answering
-     * with an error would make the provider retry something that can never
-     * succeed.
+     * An unknown reference is logged and ignored, not thrown: a 500 makes the
+     * provider retry something that can never succeed.
      */
     public function process(string $gateway, PaymentEvent $event): void
     {
@@ -89,13 +71,9 @@ class WebhookProcessor
     }
 
     /**
-     * The amount is checked against what the order actually costs before
-     * anything is marked paid. The provider's amount was set by whoever
-     * created the session, so treating it as authoritative would mean a
-     * session created for the wrong figure could settle an expensive order.
-     * A mismatch is deliberately NOT treated as payment: it's flagged for a
-     * human, since silently accepting it loses money and silently
-     * refunding it would be worse.
+     * The amount is checked against the order total before anything is marked
+     * paid — otherwise a session created for the wrong figure could settle an
+     * expensive order. A mismatch is flagged for a human, never accepted.
      */
     private function markPaid(Payment $payment, PaymentEvent $event): void
     {
@@ -126,10 +104,8 @@ class WebhookProcessor
             'meta' => $event->raw,
         ]);
 
-        // Not updateOrderStatus(): that path is for a human changing an
-        // order, and its cancel branch restores stock. Here the stock was
-        // already deducted at order creation and the goods are genuinely
-        // sold, so only the payment state changes.
+        // Not updateOrderStatus(): its cancel branch restores stock, and here
+        // the goods are genuinely sold. Only the payment state changes.
         $order->update([
             'status' => 'paid',
             'payment_status' => 'paid',
@@ -137,19 +113,10 @@ class WebhookProcessor
     }
 
     /**
-     * Expiry and failure both end the attempt, but only expiry releases
-     * stock.
-     *
-     * The difference is whether the customer can still complete this
-     * order. An expired session is over — the reservation has to come back
-     * or abandoned checkouts silently consume inventory forever. A failed
-     * payment (a declined card) leaves the order intact so the customer can
-     * retry with another card, and pulling stock out from under them
-     * mid-retry would be the wrong call.
-     *
-     * Cancellation routes through updateOrderStatus() so the restore uses
-     * the same row-locked, ledgered, double-credit-guarded path as every
-     * other cancellation.
+     * Only EXPIRY releases stock. An expired session is over, so the
+     * reservation must come back or abandoned checkouts eat inventory
+     * forever. A declined card isn't abandoned — the customer may retry, and
+     * pulling stock mid-retry would be wrong.
      */
     private function markUnsuccessful(Payment $payment, PaymentEvent $event): void
     {
@@ -168,28 +135,26 @@ class WebhookProcessor
             return;
         }
 
-        // Bind the tenant the order belongs to: updateOrderStatus() and the
-        // stock restore beneath it run tenant-scoped queries, and a webhook
-        // arrives with no tenant context at all — nobody is logged in and
-        // there's no X-Tenant-Slug header on a server-to-server call.
+        // cancelOrder() and the stock restore beneath it run tenant-scoped
+        // queries, and a webhook arrives with no tenant context at all.
         app()->instance('tenant', $order->tenant);
 
         try {
-            $this->orderService->updateOrderStatus($order, ['status' => 'cancelled']);
+            // cancelOrder(), not a bare status write, so a system cancellation
+            // carries the same reason and timestamp a staff one does.
+            // cancelled_by stays null — that null IS the "automatic" signal.
+            $this->orderService->cancelOrder($order, [
+                'cancellation_reason' => 'payment_expired',
+            ], cancelledBy: null);
         } finally {
             app()->forgetInstance('tenant');
         }
     }
 
     /**
-     * Only TenantScope is stripped, so SoftDeletingScope still applies and
-     * a soft-deleted order stays invisible here — a replayed webhook must
-     * never resurrect one and mark it paid.
-     *
-     * Returns null rather than throwing when the order can't be resolved.
-     * A webhook that 500s gets retried by the provider indefinitely, and
-     * an order that has been deleted will never come back, so retrying
-     * could only ever fail again. Log it for a human and answer 200.
+     * Only TenantScope is stripped, so a soft-deleted order stays invisible.
+     * Returns null rather than throwing: a 500 gets retried forever, and a
+     * deleted order will never come back.
      */
     private function resolveOrder(Payment $payment): ?Order
     {

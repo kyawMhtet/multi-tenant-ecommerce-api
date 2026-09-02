@@ -3,6 +3,8 @@
 namespace App\Services\Payments;
 
 use App\Models\TenantPaymentMethod;
+use App\Services\Billing\PlanFeature;
+use App\Services\Billing\PlanGate;
 use App\Services\ImageUploadService;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Arr;
@@ -11,30 +13,26 @@ use Throwable;
 
 class PaymentMethodService
 {
-    public function __construct(private readonly ImageUploadService $imageUploadService) {}
+    public function __construct(
+        private readonly ImageUploadService $imageUploadService,
+        private readonly PlanGate $plans,
+    ) {}
 
     /**
-     * Creates or updates one method for a shop, keyed on the method code.
+     * Upsert, because (tenant_id, method) is unique by design: a shop configures
+     * each method once and toggles is_enabled, so its QR and instructions
+     * survive being switched off and on.
      *
-     * Upsert rather than create/update as separate operations because
-     * (tenant_id, method) is unique by design — a shop configures each
-     * method once and toggles it with is_enabled, so its QR and
-     * instructions survive being switched off and on again. A client that
-     * had to know whether a row already existed would just be reproducing
-     * that constraint badly.
+     * The gateway comes from the catalogue, never from input — which processor
+     * backs a method isn't the shop's choice.
      *
-     * The gateway is resolved from the catalogue, never taken from input:
-     * which processor backs a method isn't the shop's choice.
-     *
-     * File ordering mirrors TenantService::update() exactly — new file
-     * written before the DB write and deleted by the catch if anything
-     * fails; the old file deleted only via DB::afterCommit once the write
-     * is known to have committed. Registering that delete earlier would be
-     * worse than useless: outside a transaction afterCommit() fires
-     * immediately, so a later failure would take a live file with it.
+     * File ordering mirrors TenantService::update(); see there for why the old
+     * file is deleted only via afterCommit.
      */
     public function upsert(array $data): TenantPaymentMethod
     {
+        $this->ensureMayUseGateway($data);
+
         [$method, $oldQr] = DB::transaction(function () use ($data) {
             $method = TenantPaymentMethod::firstOrNew(['method' => $data['method']]);
             $oldQr = $method->qr_path;
@@ -60,9 +58,8 @@ class PaymentMethodService
                 throw $e;
             }
 
-            // Only queue the old file for deletion if it was actually
-            // replaced or cleared — a save that never touched the QR must
-            // leave it alone.
+            // Only if actually replaced or cleared — a save that never touched
+            // the QR must leave it alone.
             $replaced = array_key_exists('qr_path', $attributes) && $attributes['qr_path'] !== $oldQr;
 
             return [$method, $replaced ? $oldQr : null];
@@ -73,5 +70,29 @@ class PaymentMethodService
         }
 
         return $method;
+    }
+
+    /**
+     * Gates ENABLING a method that needs a processor — today exactly `card`,
+     * via Stripe Connect. Keyed on the catalogue's gateway rather than on the
+     * method name, so a second processor is covered without being remembered
+     * here; PlanFeature::CardPayments is named for what a shop owner sees,
+     * and cards are what a processor means in this catalogue today.
+     *
+     * Manual methods (cod, qr_transfer) are never gated. They are the primary
+     * path in this market, and a plan that could not take cash on delivery
+     * would not be a plan anyone could sell a shop.
+     *
+     * DISABLING is never gated: is_enabled=false must always be allowed, or a
+     * downgraded shop would be unable to switch off the method it can no
+     * longer use.
+     */
+    private function ensureMayUseGateway(array $data): void
+    {
+        $needsProcessor = PaymentMethodCatalog::gatewayFor($data['method']) !== null;
+
+        if ($needsProcessor && ($data['is_enabled'] ?? false)) {
+            $this->plans->ensureFeature(PlanFeature::CardPayments);
+        }
     }
 }
