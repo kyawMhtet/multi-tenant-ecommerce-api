@@ -83,10 +83,15 @@ class WebhookProcessor
             return;
         }
 
-        if ($event->amount !== null && abs($event->amount - (float) $order->total) > 0.009) {
-            Log::error('Payment amount did not match the order total; not marking paid.', [
+        // Validated against what was actually CHARGED, not the order total —
+        // a deposit order is charged its deposit, and comparing that to the
+        // full total would flag every legitimate half-payment as a mismatch.
+        $expected = $order->amountDueNow();
+
+        if ($event->amount !== null && abs($event->amount - $expected) > 0.009) {
+            Log::error('Payment amount did not match the amount charged; not marking paid.', [
                 'order_id' => $order->id,
-                'expected' => (float) $order->total,
+                'expected' => $expected,
                 'received' => $event->amount,
             ]);
 
@@ -104,11 +109,22 @@ class WebhookProcessor
             'meta' => $event->raw,
         ]);
 
+        // Re-read from the ledger now the payment row is successful: a deposit
+        // and its later balance are two payments against one order, so how much
+        // has arrived is a SUM, never a flag.
+        $settled = $order->fresh()->amountPaid() + 0.009 >= (float) $order->total;
+
         // Not updateOrderStatus(): its cancel branch restores stock, and here
         // the goods are genuinely sold. Only the payment state changes.
+        //
+        // A deposit leaves `status` at 'pending' deliberately. That column
+        // tracks the COMMERCIAL lifecycle, and a half-paid preorder is not a
+        // completed sale — the shop still has to source the goods and collect
+        // the balance. payment_status carries the money story; conflating the
+        // two would have the dashboard count an unfinished import as revenue.
         $order->update([
-            'status' => 'paid',
-            'payment_status' => 'paid',
+            'status' => $settled ? 'paid' : $order->status,
+            'payment_status' => $settled ? 'paid' : 'partial',
         ]);
     }
 

@@ -34,6 +34,26 @@ class Tenant extends Model
     use HasFactory;
 
     /**
+     * Mirrors the column defaults in the migration, so a Tenant that hasn't
+     * been round-tripped through the database still answers these correctly.
+     *
+     * Not cosmetic. Both are read to STAMP other rows — currency onto every
+     * order, timezone to decide which day a sale belongs to — and a DB-level
+     * default only applies at INSERT, leaving the in-memory model null until
+     * something reloads it. That gap is invisible on the request path, where
+     * ResolveTenant always fetches the tenant, and appears the moment a
+     * freshly-created Tenant is used directly. A null here doesn't fail
+     * loudly; it writes a null currency or silently reverts a shop's clock
+     * to UTC.
+     *
+     * @var array<string, mixed>
+     */
+    protected $attributes = [
+        'currency' => 'MMK',
+        'timezone' => 'Asia/Yangon',
+    ];
+
+    /**
      * Locked out of its own admin by platform staff. Derived from the
      * timestamp rather than stored as a flag, so the two can never disagree —
      * same pattern as Order::isDispatched().

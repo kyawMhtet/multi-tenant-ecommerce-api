@@ -80,4 +80,31 @@ class SubscriptionInvoice extends Model
     {
         return $query->whereIn('status', ['pending', 'failed']);
     }
+
+    /**
+     * The shop asked for bank details and has sent nothing yet.
+     *
+     * Deliberately NOT part of the review queue: there is nothing for a human
+     * to decide here. It is a list to chase or ignore, and mixing the two made
+     * the queue mean two different things at once.
+     */
+    public function scopeAwaitingTransfer(Builder $query): Builder
+    {
+        return $query->where('status', 'pending')
+            ->where('gateway', 'manual')
+            ->whereNull('proof_path')
+            ->orderBy('created_at');
+    }
+
+    /**
+     * Asked for, never sent, and old enough that the period it quotes has
+     * stopped being meaningful. Reusing one would bill the shop for a month
+     * that has already passed.
+     */
+    public function scopeStaleIntent(Builder $query): Builder
+    {
+        return $query->awaitingTransfer()->where(
+            'created_at', '<', now()->subDays((int) config('billing.transfer_intent_expiry_days'))
+        );
+    }
 }

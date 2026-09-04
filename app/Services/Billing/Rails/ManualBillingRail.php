@@ -77,6 +77,20 @@ class ManualBillingRail implements BillingRail
      */
     private function pendingInvoice(Subscription $subscription, string $plan, string $currency): SubscriptionInvoice
     {
+        // Abandoned intents are voided rather than reused. One raised months
+        // ago still quotes a period that has since gone by, so handing it back
+        // would bill the shop for a month already over — and it would keep a
+        // dead row in the platform's chase list forever. Cleaned up lazily
+        // here, when the shop returns, rather than by a scheduler: the dates
+        // already say when an intent went stale.
+        $subscription->invoices()
+            ->staleIntent()
+            ->where('plan', $plan)
+            ->update([
+                'status' => 'void',
+                'note' => 'Expired — no transfer was received against this reference.',
+            ]);
+
         $existing = $subscription->invoices()
             ->unpaid()
             ->where('gateway', 'manual')

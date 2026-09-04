@@ -155,8 +155,8 @@ class SubscriptionService
     /**
      * Attaches the shop's transfer screenshot to an invoice.
      *
-     * IT DOES NOT SETTLE ANYTHING. The status stays 'pending' and the plan
-     * does not move. A screenshot is trivially forged and frequently just
+     * IT DOES NOT SETTLE ANYTHING. The status becomes (or stays) 'pending'
+     * and the plan does not move. A screenshot is trivially forged and frequently just
      * wrong — right amount, wrong recipient — and here the party uploading it
      * is the party being billed, so treating it as payment would let any shop
      * grant itself a plan with an image file. It exists so a human can glance
@@ -182,6 +182,22 @@ class SubscriptionService
                     $proof,
                     'billing-proofs/'.$invoice->tenant_id,
                 ),
+                // A new screenshot is a NEW CLAIM, so a previously rejected
+                // invoice goes back into the review queue.
+                //
+                // Without this it went nowhere: 'failed' is excluded from
+                // scopeAwaitingApproval(), and scopeAwaitingTransfer() only
+                // matches invoices with no proof at all — so a rejected
+                // transfer the shop re-uploaded against was invisible to
+                // reviewers permanently, which silently broke the recovery
+                // path rejection is designed around ("transfer again and
+                // upload against the same reference").
+                //
+                // reviewed_by / reviewed_at / note are deliberately KEPT. The
+                // next reviewer wants to see that this was rejected before and
+                // why — a second screenshot for the same wrong amount should
+                // be recognisable as such.
+                'status' => 'pending',
             ]);
 
             // Deferred, never synchronous: file I/O is not transactional, so

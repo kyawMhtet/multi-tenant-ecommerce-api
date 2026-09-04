@@ -42,7 +42,20 @@ class StripeGateway implements PaymentGateway
             throw new RuntimeException('This shop has not finished connecting its Stripe account.');
         }
 
-        $currency = strtolower($order->currency ?? $tenant->currency ?? 'usd');
+        // The ORDER's currency, not the tenant's. They agree today because
+        // OrderService snapshots the tenant's at creation, but the order is the
+        // one that records what this customer was actually quoted — the same
+        // reason the amount comes off the order rather than being recomputed.
+        //
+        // This used to read `$order->currency ?? $tenant->currency ?? 'usd'`,
+        // which looked like a safe fallback chain and was entirely dead: the
+        // column is NOT NULL with an MMK default, so the first operand always
+        // won and every shop charged in Kyat regardless of where it trades.
+        // Stripe does not support MMK at all, so a Thai shop's Checkout Session
+        // was rejected outright and surfaced only as "payment initiation
+        // failed". A fallback that can never fire is worse than none — it reads
+        // as protection while providing nothing.
+        $currency = strtolower((string) $order->currency);
 
         $session = $this->stripe->checkout->sessions->create([
             'mode' => 'payment',
@@ -51,7 +64,11 @@ class StripeGateway implements PaymentGateway
                 'quantity' => 1,
                 'price_data' => [
                     'currency' => $currency,
-                    'unit_amount' => StripeMoney::toMinor((float) $order->total, $currency),
+                    // The DEPOSIT when the order carries one, the whole total
+                    // otherwise — Order::amountDueNow() is the single definition,
+                    // shared with the pending payment row and the webhook that
+                    // validates what comes back.
+                    'unit_amount' => StripeMoney::toMinor($order->amountDueNow(), $currency),
                     'product_data' => ['name' => 'Order '.$order->order_number],
                 ],
             ]],

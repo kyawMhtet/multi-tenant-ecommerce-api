@@ -14,13 +14,27 @@ class StorefrontProductVariantResource extends JsonResource
     public function toArray(Request $request): array
     {
         $stockStatus = $this->stockStatus();
+        $onSale = $this->discountActive();
 
         return [
             'slug' => $this->slug,
             'variant_name' => $this->variant_name,
             'attributes' => $this->attributes,
             'unit' => $this->unit,
+            // Always the LIST price, discounted or not — it's the "was"
+            // figure a sale price is struck through against. A client that
+            // knows nothing about sale_price therefore shows the higher
+            // number and the customer is charged less, which is the safe
+            // direction for an old client to be wrong in.
             'selling_price' => $this->selling_price,
+            // Null when nothing is running, so "is this on sale" is one
+            // check rather than a date comparison the client has to get
+            // right. Advisory, like preorder_deposit_percent: OrderService
+            // prices the cart server-side and this never reaches it.
+            'sale_price' => $onSale ? number_format($this->effectivePrice(), 2, '.', '') : null,
+            // The badge figure, derived even for a fixed discount so the
+            // storefront renders one badge instead of branching on type.
+            'discount_percent' => $onSale ? $this->discountPercent() : null,
             'stock_status' => $stockStatus,
             // Only when actually on preorder, so a client can't render "ships
             // in 2 weeks" against something on the shelf. The customer must
@@ -28,10 +42,18 @@ class StorefrontProductVariantResource extends JsonResource
             'preorder_lead_time_days' => $stockStatus === 'preorder'
                 ? $this->preorder_lead_time_days
                 : null,
-            // Lets checkout hide COD for a cart containing this item. Advisory
-            // only — OrderService enforces the same rule server-side.
-            'preorder_requires_prepayment' => $stockStatus === 'preorder'
-                ? (bool) $this->preorder_requires_prepayment
+            // What the customer must pay up front, as a percentage. Lets
+            // checkout hide COD and show "50% deposit" BEFORE they commit —
+            // finding out at the payment step that half is due is the same
+            // surprise as finding out about the wait after paying.
+            //
+            // Withheld unless the status is preorder, same as the lead time: a
+            // variant with stock in hand ships today and asks for no deposit,
+            // whatever the shop has set for when it runs out.
+            //
+            // Advisory only — OrderService enforces the real rule server-side.
+            'preorder_deposit_percent' => $stockStatus === 'preorder'
+                ? (int) $this->preorder_deposit_percent
                 : null,
             // Empty when the variant has no photos of its own; falling back to
             // the product's is a frontend display choice.

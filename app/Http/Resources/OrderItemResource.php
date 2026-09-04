@@ -31,7 +31,11 @@ class OrderItemResource extends JsonResource
             // if the variant is back in stock or the lead time has changed.
             'is_preorder' => $this->is_preorder,
             'preorder_lead_time_days' => $this->preorder_lead_time_days,
+            // The list price, with what came off it beside — a receipt has to
+            // show the customer the saving, not just a smaller number.
+            // unit_price x quantity - discount_amount = line_total.
             'unit_price' => $this->unit_price,
+            'discount_amount' => $this->discount_amount,
             'line_total' => $this->line_total,
         ];
     }

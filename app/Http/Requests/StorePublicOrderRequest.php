@@ -28,7 +28,23 @@ class StorePublicOrderRequest extends FormRequest
         return [
             'items' => ['required', 'array', 'min:1'],
             'items.*.product_variant_slug' => ['required', 'string', function ($attribute, $value, $fail) {
-                if (! ProductVariant::where('slug', $value)->exists()) {
+                // is_active on BOTH variant and product, matching
+                // StorefrontProductService::findPublicVariant(). Without it the
+                // write path stayed open to everything the read path hides:
+                // slugs are permanent and public by design (they get pasted
+                // into chat apps), so any link that ever circulated kept taking
+                // orders for a product the shop had deliberately pulled.
+                //
+                // The tenant's own is_active is NOT re-checked here, unlike in
+                // findPublicVariant() — this route is behind ResolveTenant,
+                // which already refuses an inactive shop. There it's load-bearing
+                // because no tenant is bound at all.
+                $sellable = ProductVariant::where('slug', $value)
+                    ->where('is_active', true)
+                    ->whereHas('product', fn ($query) => $query->where('is_active', true))
+                    ->exists();
+
+                if (! $sellable) {
                     $fail('One or more items are invalid.');
                 }
             }],

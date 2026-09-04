@@ -78,7 +78,7 @@ class CheckoutService
             Payment::create([
                 'order_id' => $order->id,
                 'gateway' => $method->gateway,
-                'amount' => $order->total,
+                'amount' => $order->amountDueNow(),
                 'status' => 'pending',
                 'transaction_ref' => $initiation->reference,
             ]);
@@ -105,7 +105,7 @@ class CheckoutService
         Payment::create([
             'order_id' => $order->id,
             'gateway' => 'manual',
-            'amount' => $order->total,
+            'amount' => $order->amountDueNow(),
             'status' => 'pending',
             'proof_path' => $this->imageUploadService->store($proof, 'payment-proofs/'.$order->tenant_id),
         ]);

@@ -19,13 +19,8 @@ class TenantSeeder extends Seeder
             'owner_name' => 'Test Owner',
             'owner_email' => 'owner@test-shop.test',
             'owner_phone' => '09123456789',
-            // Nothing about plans is set here any more: those columns moved
-            // to the `subscriptions` table, and the trial is started below
-            // through SubscriptionService, exactly as registration does it.
             'currency' => 'MMK',
             'timezone' => 'Asia/Yangon',
-            // A flat fee so the delivery/total maths is visible in seeded
-            // orders rather than always being a silent zero.
             'delivery_fee' => 2000,
             'is_active' => true,
         ]);

@@ -272,3 +272,127 @@ test('the public order response never exposes cost fields', function () {
     expect(json_encode($body))->not->toContain('111.11')
         ->and($body['data']['items'][0])->not->toHaveKey('unit_cost');
 });
+
+// ---------------------------------------------------------------------------
+// What the shop has hidden
+//
+// The read path (StorefrontProductService::findPublicVariant) has always
+// checked is_active on variant, product AND tenant, so hiding anything 404s
+// the product page. The WRITE path checked none of them, and resolved on slug
+// alone — so every link that had ever circulated kept taking orders for
+// products the shop had deliberately pulled, deducting real stock.
+//
+// Slugs are permanent and public by design (they get pasted into chat apps),
+// which is exactly why the two paths have to agree.
+// ---------------------------------------------------------------------------
+
+test('a deactivated variant cannot be bought, even though its slug still resolves for the shop', function () {
+    [$tenant] = makeTenantUser();
+    enablePaymentMethodForTenant($tenant);
+    $product = createProductForTenant($tenant, variantOverrides: ['current_stock' => 10]);
+    $variant = $product->variants->first();
+
+    $variant->update(['is_active' => false]);
+
+    $this->withHeader('X-Tenant-Slug', $tenant->slug)
+        ->postJson('/api/v1/public/orders', [
+            'items' => [['product_variant_slug' => $variant->slug, 'quantity' => 2]],
+            'customer_name' => 'Guest',
+            'customer_phone' => '09123456789',
+            'payment_method' => 'cod',
+            'fulfillment_type' => 'pickup',
+        ])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors('items.0.product_variant_slug');
+
+    // The stock is the real assertion: a 422 that still deducted would be
+    // worse than the bug it replaced.
+    expect(Order::withoutGlobalScopes()->count())->toBe(0)
+        ->and((float) $variant->fresh()->current_stock)->toBe(10.0);
+});
+
+test('a variant of a deactivated product cannot be bought either', function () {
+    [$tenant] = makeTenantUser();
+    enablePaymentMethodForTenant($tenant);
+    // The variant itself stays active — only the product is pulled, which is
+    // how a shop hides a whole listing rather than one size of it.
+    $product = createProductForTenant($tenant, variantOverrides: ['current_stock' => 10]);
+    $variant = $product->variants->first();
+
+    $product->update(['is_active' => false]);
+
+    $this->withHeader('X-Tenant-Slug', $tenant->slug)
+        ->postJson('/api/v1/public/orders', [
+            'items' => [['product_variant_slug' => $variant->slug, 'quantity' => 2]],
+            'customer_name' => 'Guest',
+            'customer_phone' => '09123456789',
+            'payment_method' => 'cod',
+            'fulfillment_type' => 'pickup',
+        ])
+        ->assertStatus(422);
+
+    expect(Order::withoutGlobalScopes()->count())->toBe(0)
+        ->and((float) $variant->fresh()->current_stock)->toBe(10.0);
+});
+
+test('the checkout refuses exactly what the product page hides', function () {
+    [$tenant] = makeTenantUser();
+    enablePaymentMethodForTenant($tenant);
+    $product = createProductForTenant($tenant, variantOverrides: ['current_stock' => 10]);
+    $variant = $product->variants->first();
+
+    $product->update(['is_active' => false]);
+
+    // Read path and write path, asserted together — the pair is the invariant,
+    // and testing either alone is what let them drift apart.
+    $this->getJson("/api/v1/public/products/{$variant->slug}")->assertNotFound();
+
+    $this->withHeader('X-Tenant-Slug', $tenant->slug)
+        ->postJson('/api/v1/public/orders', [
+            'items' => [['product_variant_slug' => $variant->slug, 'quantity' => 1]],
+            'customer_name' => 'Guest',
+            'customer_phone' => '09123456789',
+            'payment_method' => 'cod',
+            'fulfillment_type' => 'pickup',
+        ])
+        ->assertStatus(422);
+});
+
+test('the service refuses a hidden variant even when validation is bypassed', function () {
+    [$tenant] = makeTenantUser();
+    $product = createProductForTenant($tenant, variantOverrides: ['current_stock' => 10]);
+    $variant = $product->variants->first();
+
+    $variant->update(['is_active' => false]);
+
+    // Straight at the service, past the Form Request. The duplicated filter in
+    // resolveCartLinesBySlug() is the defence-in-depth half: a check that
+    // lives only in validation is one route registration away from being gone.
+    expect(fn () => createOnlineOrderForTenant($tenant, [
+        ['product_variant_slug' => $variant->slug, 'quantity' => 1],
+    ], ['fulfillment_type' => 'pickup']))
+        ->toThrow(Illuminate\Database\Eloquent\ModelNotFoundException::class);
+
+    expect((float) $variant->fresh()->current_stock)->toBe(10.0);
+});
+
+test('an active variant of an active product is still perfectly sellable', function () {
+    [$tenant] = makeTenantUser();
+    enablePaymentMethodForTenant($tenant);
+    $product = createProductForTenant($tenant, variantOverrides: ['current_stock' => 10]);
+    $variant = $product->variants->first();
+
+    // The guard against over-correcting: it would be easy to filter this so
+    // hard that nothing sells at all.
+    $this->withHeader('X-Tenant-Slug', $tenant->slug)
+        ->postJson('/api/v1/public/orders', [
+            'items' => [['product_variant_slug' => $variant->slug, 'quantity' => 2]],
+            'customer_name' => 'Guest',
+            'customer_phone' => '09123456789',
+            'payment_method' => 'cod',
+            'fulfillment_type' => 'pickup',
+        ])
+        ->assertCreated();
+
+    expect((float) $variant->fresh()->current_stock)->toBe(8.0);
+});

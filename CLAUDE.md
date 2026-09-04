@@ -139,6 +139,70 @@ sharing one catalog/inventory/order backend per tenant.
 - `order_items.unit_price` and `unit_cost` are snapshotted at sale time. Margin reporting always
   uses this snapshot, never today's variant price.
 
+## Discounts
+- **Per VARIANT, next to `selling_price`** — every price in this app lives on the variant, so a
+  product-level discount would have to reach across variants at different prices and decide what
+  "20% off" meant for each.
+- **`discount_type` + `discount_value`, never a `sale_price` column.** A stored sale price is a
+  second source of truth for one fact: raise `selling_price` later and the "20% off" silently
+  becomes 35% off, or inverts. A percentage survives a reprice. `fixed` keeps "500 MMK off"
+  expressible, which makes the pair a strict superset of any single sale-price column — the same
+  superset argument that replaced `preorder_requires_prepayment` with a percentage.
+- `DiscountType` is an enum for the same reason `PlanFeature` is: each case names arithmetic the
+  app has to perform, so a third case invented in a database row would name a calculation nothing
+  can do. Its `match()` is exhaustive, so adding a case is a compile-time hole rather than a
+  silently-zero discount.
+- **The window is DERIVED, never a flag.** `discount_starts_at`/`discount_ends_at` are both
+  nullable and `ProductVariant::discountActive()` computes liveness from them — an `is_on_sale`
+  boolean can disagree with its own dates, and the shop has to remember to untick it. Same
+  reasoning as billing grace deriving from `current_period_ends_at`. The interval is half-open
+  `[starts, ends)`, so "until the 10th" means the 9th was the last day. Null start = live now,
+  null end = until withdrawn.
+- **`effectivePrice()` is computed, never stored**, and `OrderService::priceLine()` is the ONE
+  place it becomes money — shared by the POS and storefront resolvers so the two can never price
+  the same item differently. Read off the variant server-side, never from request input: a
+  reduction a client can send is a reduction a customer can invent, the same rule that keeps
+  `tenant_id`, `unit_price` and `delivery_fee` out of the request body. A discount that expires
+  between page load and checkout is charged at full price — the server decides what a thing costs.
+- Clamped at 0 by `DiscountType::amountOff()` so a discount can never make a price negative. The
+  clamp is the real guard rather than validation, because `selling_price` is mutable: a fixed
+  5,000 off that was sane when set is excessive once the item is repriced to 3,000, with nobody
+  having touched the discount. Deliberately NOT clamped at `buying_price` — selling below cost is
+  clearance, a real thing shops do on purpose, and margin reporting shows the loss honestly. Same
+  position as a variant sitting at -7 stock.
+- **`order_items.unit_price` stays the LIST price**, with `order_items.discount_amount` beside it,
+  rather than folding the reduction into `unit_price`. Writing the discounted figure there would
+  lose the fact that a promotion happened at all, and "what did this month's sale cost us" would
+  stop being answerable. Snapshotted, same rule as `unit_price` and `deposit_amount`: withdrawing
+  a promotion must not rewrite what a past customer was charged.
+- **This is what made `orders.discount_amount` and `calculateTotal()`'s hardcoded 0 real.**
+  `orders.subtotal` is GROSS (quantity x list price); `orders.discount_amount` is the sum of the
+  line reductions; the discount is subtracted exactly once, in `calculateTotal()`. So
+  `subtotal - discount_amount = SUM(line_total)`, which is why the resolvers report
+  `lineSubtotal` and `lineDiscount` separately instead of only a net figure. `GOODS_REVENUE_SQL`
+  (`total - delivery_fee`) is therefore already net of discounts with no change.
+- `createPosOrder()`'s cash `Payment` records `$order->total`, not `$subtotal` — subtotal is now
+  gross, and recording it would overstate the till by the discount on every promoted sale.
+- The deposit is taken on the DISCOUNTED line total: a deposit is a share of what is actually
+  owed, not of a price nobody is paying.
+- **Not plan-gated.** Running a promotion is ordinary retail, not a paid capability — the same
+  call made about dispatch tracking, which looked like a classic upsell and would have gated the
+  product rather than an extra. It is role-gated only by living on the variant write endpoints
+  (`role:manager`).
+- Storefront: `selling_price` stays the LIST price (the "was" figure struck through), with
+  `sale_price` null unless a discount is running and `discount_percent` as the badge — derived
+  even for a fixed discount, so the client renders one badge instead of branching on type. A
+  client that knows nothing about `sale_price` shows the higher number and the customer is
+  charged less, which is the safe direction for an old client to be wrong in. Advisory only, like
+  `preorder_deposit_percent`.
+- Clearing a discount is `discount_type: null`, and `ProductService::clearedDiscount()` takes the
+  value and window with it, keyed on the KEY BEING PRESENT — a PATCH that never mentions the
+  discount leaves it alone, exactly as one without `selling_price` doesn't reprice the item.
+- **Not built:** order-level discounts and coupon codes. Note `orders.discount_amount` currently
+  means "the sum of the line discounts" — an order-level coupon added later must get its OWN
+  column, or the two become indistinguishable and neither can be reported on. Also not built: a
+  storefront "on sale" filter/scope, and category- or cart-wide promotions.
+
 ## Preorder / backorder
 - **Preorder is a permission to sell below zero, not a second counter.** `product_variants.allow_preorder`
   lifts the sufficiency check in `StockService::deductForSale()`, so `current_stock` goes negative.
@@ -185,11 +249,16 @@ sharing one catalog/inventory/order backend per tenant.
   reason, kept distinct from `out_of_stock` — one means the shop ran out, the other means it
   knowingly sold ahead and the supplier slipped, and counting them together hides which of the
   two supply problems is actually costing orders.
-- **`preorder_requires_prepayment` refuses deferred payment on a preorder line.** A three-week
-  COD preorder is a promise with nothing behind it: the shop pays the importer up front and the
-  customer can walk away at the door. Per VARIANT because the risk scales with the item — a shop
-  sends a phone case COD and would never send an imported phone the same way, and both sit in one
-  catalogue.
+- **`preorder_deposit_percent` is how much must be paid up front on a preorder line** (0-100).
+  A three-week COD preorder is a promise with nothing behind it: the shop pays the importer up
+  front and the customer can walk away at the door. Per VARIANT because the risk scales with the
+  item — a shop sends a phone case COD and would never send an imported phone the same way, and
+  both sit in one catalogue.
+- It replaced a boolean (`preorder_requires_prepayment`) because both extremes fail on a real
+  import: a customer won't wire 668,000 MMK to a shop they found on Facebook, and the shop won't
+  front that to a Bangkok showroom on a stranger's promise. **"Half prepaid" is what these shops
+  actually advertise**, and the percentage is a strict superset — 0 is what `false` meant, 100 is
+  what `true` meant.
 - The rule keys on `PaymentMethodCatalog::collectsUpfront()` — **when the money arrives, not who
   processes it.** `qr_transfer` has no gateway at all yet is paid in full up front, so it passes;
   a future "pay at pickup" would be deferred whatever handled it. Unknown methods are treated as
@@ -203,13 +272,29 @@ sharing one catalog/inventory/order backend per tenant.
   which is correct rather than harsh: an order carries a single payment method, so there is no
   way to part-pay one line and defer another. A null `payment_method` is a POS sale, already
   recorded as paid at the counter, so the rule doesn't apply.
+- **ANY deposit requires a method that collects upfront, not just a 100% one.** COD collects
+  nothing at the moment of ordering, so "half now" is exactly as impossible on it as "all now".
+  The percentage decides HOW MUCH is taken, never WHETHER the method can take it.
+- `order_items.deposit_amount` is the SNAPSHOT, same rule as `unit_price`: a shop changing its
+  terms next week must not rewrite what this customer was asked for. Only a line that ACTUALLY
+  went below zero carries one — an in-stock line ships today and is governed by the payment
+  method alone, whatever percentage the variant carries for when it runs out.
+- `Order::amountDueNow()` is the ONE definition of what to charge — the deposit when there is
+  one, the total otherwise. Used by `StripeGateway`, the pending `payments` row and
+  `WebhookProcessor`'s amount check alike; three places computing it separately is how a customer
+  gets charged one amount and credited another.
+- **How much has been received is a SUM over `payments`, never a flag** (`Order::amountPaid()`),
+  because a deposit and its later balance are two payments against one order. `payment_status`
+  becomes `partial` when the deposit lands and `paid` once the total is covered; `status` stays
+  `pending` on a partial, because that column tracks the COMMERCIAL lifecycle and a half-paid
+  import the shop hasn't sourced yet is not a completed sale.
 - `StorefrontProductVariantResource` publishes the flag (withheld unless the status is
   `preorder`, same as the lead time) so checkout can hide COD, but that is **advisory only** —
   the server check is the real one, since a client that ignores it must still be refused.
-- **Still not built:** partial payments — take a deposit, collect the rest on delivery. That's
-  the complete answer, and `payment_status` already has an unused `'partial'` waiting for it.
-  What exists today is the all-or-nothing gate, which needs no new payment flow and can be
-  replaced by deposits later with no migration. Don't build deposits without asking.
+- **Still not built:** collecting the BALANCE through the app. The deposit is charged and
+  recorded; the rest is settled the way COD already is — in person, marked by the shop. A second
+  gateway charge for the balance would need a stored card or a new payment link, and neither
+  exists yet.
 
 ## Payments
 - Payment *method* (what the customer picks: `card`, `cod`) and *gateway* (who processes it:
@@ -381,6 +466,38 @@ sharing one catalog/inventory/order backend per tenant.
 - Laravel Cashier was rejected: Stripe-only, so it can't model the manual rail at all, and it
   ships duplicate tables and webhook handling that collide with the existing `PaymentGateway`
   abstraction.
+## Shop staff and roles
+- **A shop is no longer one account.** `POST /staff` (owner only) creates additional users;
+  `users.role` is `owner | manager | cashier`, and `ShopRole` is a strict LADDER, not a matrix —
+  an owner can do anything a manager can, a manager anything a cashier can. A matrix would need
+  a UI, a table, and a story for what happens when a route is added and nobody updates it.
+- `role:<minimum>` middleware is a FLOOR, not an exact match, so adding a rung above never
+  silently locks anyone out. Same shape as `plan:<feature>`, and the same division of labour:
+  it gates whole endpoints, while a permission that is one FIELD belongs in the resource —
+  `ProductVariantResource` withholds `buying_price` from a cashier without forbidding the
+  product list itself.
+- **403, never 402.** Billing refusals are 402 so the admin app can render an upgrade prompt
+  without reading message text; upgrading a plan does nothing for a cashier who needs promoting,
+  so the two must stay distinguishable by status code alone.
+- Cashier: POS sales, order reads, status updates, dispatch. Manager: adds catalogue writes,
+  cancel, refund, couriers, margin reports. Owner: adds staff, billing, shop profile, payment
+  config, Stripe.
+- **`User` deliberately carries no `BelongsToTenant`** — login has to resolve a user before any
+  tenant is bound. So every staff query goes through `$tenant->users()` explicitly. A bare
+  `User::count()` would count the whole platform and let one shop's headcount consume another's
+  seats; there is a test for exactly that.
+- The `staff` limit counts EVERY user row including the owner — one seat is one login, so
+  Starter is owner + 2. Enforced in `StaffService::create()` inside the transaction, with
+  `lockForUpdate()` on the count so two concurrent invites can't both pass the ceiling.
+- Guards that exist because one click could otherwise be unrecoverable: nobody may remove or
+  demote their own account, and the last owner may not be demoted or deleted. Same reasoning as
+  `PlatformAdminService`'s self-deactivation refusal.
+- Removing staff deletes their tokens, so revocation is immediate rather than waiting for a
+  token to expire.
+- The trial grants Pro (`billing.trial_plan`), which has NO seat ceiling — a new shop only meets
+  the limit after dropping to Starter. Tests covering the limit must set the plan explicitly
+  rather than inheriting the trial default.
+
 ## Platform admin
 - **Platform staff are `platform_admins` rows, NEVER `users` rows**, and that separation is the
   security model rather than tidiness. `TenantScope::apply()` only adds its filter when
@@ -413,6 +530,15 @@ sharing one catalog/inventory/order backend per tenant.
 - Rejecting leaves the invoice UNPAID rather than voiding it, so the shop can transfer again and
   upload against the same one (`ManualBillingRail` reuses an unpaid invoice). A reason is required:
   a shop told only "rejected" opens a support ticket asking why.
+- **`submitProof()` moves a `failed` invoice back to `pending`, and that is load-bearing.** A new
+  screenshot is a new claim. Without the reset the re-uploaded invoice matched neither
+  `scopeAwaitingApproval()` (which requires `pending`) nor `scopeAwaitingTransfer()` (which
+  requires no proof at all), so it was invisible to reviewers forever — silently breaking the
+  recovery path rejection is designed around. Widening the queue scope to `unpaid()` + proof
+  instead would be wrong: it cannot tell "re-uploaded" from "rejected and untouched", so a bad
+  screenshot would return to the queue on its own and be rejected in a loop.
+  `reviewed_by`/`reviewed_at`/`note` are KEPT across the reset, so the next reviewer can see it
+  was rejected before and why.
 - `subscription_invoices.reviewed_by`/`reviewed_at` are named for REVIEW, not approval, because a
   human can rule either way — `approved_by` holding the id of someone who rejected a forged
   screenshot would be a column whose name lies. `status` carries the outcome, `paid_at` the money.
@@ -442,9 +568,23 @@ sharing one catalog/inventory/order backend per tenant.
   — one click would otherwise lock every human out of the payment queue. Deactivation never
   deletes: `EnsurePlatformAdmin` re-checks `is_active` per request so revocation is immediate,
   and `subscription_invoices.reviewed_by` points here.
-- `GET /platform/billing/invoices` (ledger, all statuses, newest first) is separate from
-  `/billing/pending` (the review QUEUE, actionable first). Different questions; both live in
-  `SubscriptionReviewService` because splitting would duplicate the bypass discipline.
+- **Three lists, three questions**, all in `SubscriptionReviewService` because splitting would
+  duplicate the bypass discipline:
+  - `/billing/pending` — the review QUEUE. Proof-carrying invoices ONLY: what a human must rule
+    on. It used to include proofless ones too, which made it answer two questions at once and had
+    to be visually filtered before it could be worked.
+  - `/billing/awaiting-transfer` — shops that asked how to pay and sent nothing. A chase list;
+    nothing here is actionable. NOT hidden, because a shop that transfers and forgets to upload is
+    common on this rail and the money needs an invoice to land against.
+  - `/billing/invoices` — the ledger, all statuses, newest first, for reconciliation.
+- Raising an invoice at "pay by transfer" is unavoidable and not a false record: the invoice is
+  what carries the `SUB-nn` reference the shop quotes in the transfer note, so it must exist
+  before any money moves. `status: pending, proof_path: null` accurately means "billed, nothing
+  received" — the screenshot cannot be required at that moment because the shop hasn't transferred
+  yet.
+- An abandoned intent (proofless, older than `billing.transfer_intent_expiry_days`) is VOIDED and
+  re-quoted the next time the shop asks — lazily, in `ManualBillingRail`, since the dates already
+  say when it went stale. Reusing one would bill the shop for a period that has already passed.
 - Approving or rejecting sends `SubscriptionPaymentReviewed` to the shop's users. The reason
   travels with a rejection, since a shop told only "rejected" cannot act on it.
 
@@ -501,6 +641,13 @@ sharing one catalog/inventory/order backend per tenant.
     on the date, so **no scheduler exists or should be added**; a nightly job would be a second
     source of truth for what the dates already answer. A downgrade with no paid time left applies
     immediately, since there is nothing to protect.
+- **The period on an invoice is a QUOTE, not what gets granted.** Dates are computed when an
+  invoice is raised, but on the manual rail the money is confirmed days or weeks later — transfer,
+  arrival, then a human. `SubscriptionReviewService::grantedPeriod()` honours a still-live quoted
+  period exactly (so paying early extends), and otherwise grants the same LENGTH from now,
+  correcting the invoice to match. Without it a shop could pay, be approved, and be read-only the
+  same second because the month it bought had already elapsed — it had paid for nothing. Not an
+  issue on the card rail, where Stripe reports the real period and confirms immediately.
 - `effectivePlan()` is the ONLY thing anything may read for entitlement. `plan` is the plan as of
   the current period; `pending_plan` is an agreed future change.
 - A shop with a live Stripe subscription is refused **both** rails (`BillingActionUnavailableException`,

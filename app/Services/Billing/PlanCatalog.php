@@ -26,10 +26,8 @@ class PlanCatalog
             'label' => 'Starter',
             'limits' => [
                 'products' => 50,
-                // No enforcement point yet: this app has no staff-management
-                // endpoint, so no request can create a second user. Listed
-                // here so the number is decided in one place when that
-                // endpoint arrives, rather than invented at the call site.
+                // Counts every user row including the owner: one seat is one
+                // login. Enforced in StaffService::create().
                 'staff' => 3,
             ],
             'features' => [],

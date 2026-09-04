@@ -12,6 +12,7 @@ use App\Models\ProductVariant;
 use App\Notifications\NewOnlineOrderReceived;
 use App\Services\Delivery\DeliveryFeeCalculator;
 use App\Services\Payments\PaymentMethodCatalog;
+use App\Services\Tenants\BusinessDay;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
@@ -25,7 +26,9 @@ class OrderService
     ) {}
 
     /**
-     * whereDate, not a timestamp range: "Aug 1 to Aug 5" means both days in full.
+     * Date filters are the SHOP's calendar days, bracketed into UTC instants by
+     * BusinessDay — "Aug 1 to Aug 5" means both days in full, on the shop's
+     * clock rather than the server's.
      */
     public function listOrders(array $filters): \Illuminate\Contracts\Pagination\LengthAwarePaginator
     {
@@ -42,12 +45,21 @@ class OrderService
             $query->where('source', $filters['source']);
         }
 
-        if (! empty($filters['date_from'])) {
-            $query->whereDate('created_at', '>=', $filters['date_from']);
+        // Resolved in the SHOP's timezone and compared as bare timestamps.
+        // "Aug 1 to Aug 5" still means both days in full — that requirement is
+        // now met by a half-open range rather than by DATE(created_at), which
+        // meant the same thing to a reader but made the column unindexable.
+        [$from, $to] = BusinessDay::range(
+            $filters['date_from'] ?? null,
+            $filters['date_to'] ?? null,
+        );
+
+        if ($from !== null) {
+            $query->where('created_at', '>=', $from);
         }
 
-        if (! empty($filters['date_to'])) {
-            $query->whereDate('created_at', '<=', $filters['date_to']);
+        if ($to !== null) {
+            $query->where('created_at', '<', $to);
         }
 
         return $query->latest()->paginate($filters['per_page'] ?? 15);
@@ -63,11 +75,16 @@ class OrderService
     {
         return DB::transaction(function () use ($data) {
             $lines = $this->resolveCartLines($data['items']);
-            $subtotal = round($lines->sum('lineTotal'), 2);
+            // Gross, before discounts — so subtotal, discount_amount and total
+            // read like an invoice and calculateTotal() subtracts exactly once.
+            $subtotal = round($lines->sum('lineSubtotal'), 2);
+            $discount = round($lines->sum('lineDiscount'), 2);
+
+            $tenant = app('tenant');
 
             // No fulfillment_type on a counter sale, so this is zero. Routed
             // through the calculator anyway to keep one rule, not two.
-            $deliveryFee = $this->deliveryFees->for(app('tenant'), $data['fulfillment_type'] ?? null);
+            $deliveryFee = $this->deliveryFees->for($tenant, $data['fulfillment_type'] ?? null);
 
             $order = Order::create([
                 'order_number' => $this->generateOrderNumber('POS'),
@@ -76,10 +93,19 @@ class OrderService
                 'status' => 'paid',
                 'payment_status' => 'paid',
                 'subtotal' => $subtotal,
-                'discount_amount' => 0,
+                // The sum of the per-line reductions, snapshotted from each
+                // variant's discount at the moment of sale.
+                'discount_amount' => $discount,
                 'tax_amount' => 0,
                 'delivery_fee' => $deliveryFee,
-                'total' => $this->calculateTotal($subtotal, 0, 0, $deliveryFee),
+                'total' => $this->calculateTotal($subtotal, $discount, 0, $deliveryFee),
+                // Snapshotted from the shop, the same rule as unit_price and
+                // delivery_fee. Every money column here is bare decimal with no
+                // currency tag, so an order that doesn't carry its own unit is
+                // only interpretable by joining back to the tenant — and the
+                // column's MMK default silently made every Thai shop's takings
+                // read as Kyat, including to StripeGateway.
+                'currency' => $tenant->currency,
             ]);
 
             $this->createOrderItems($order, $lines);
@@ -87,7 +113,10 @@ class OrderService
             Payment::create([
                 'order_id' => $order->id,
                 'gateway' => 'cash',
-                'amount' => $subtotal,
+                // The total, not the subtotal: subtotal is gross, and a
+                // discounted counter sale must record the money that actually
+                // went in the till, not the pre-discount figure.
+                'amount' => $order->total,
                 'status' => 'success',
                 'paid_at' => now(),
             ]);
@@ -111,7 +140,8 @@ class OrderService
     {
         $order = DB::transaction(function () use ($data) {
             $lines = $this->resolveCartLinesBySlug($data['items']);
-            $subtotal = round($lines->sum('lineTotal'), 2);
+            $subtotal = round($lines->sum('lineSubtotal'), 2);
+            $discount = round($lines->sum('lineDiscount'), 2);
 
             $customer = $this->findOrCreateCustomer(
                 $data['customer_name'],
@@ -119,9 +149,11 @@ class OrderService
                 $data['delivery_address']['full_address'] ?? null,
             );
 
+            $tenant = app('tenant');
+
             // Server-side only: a fee read from the request body is a fee the
             // customer can set to zero.
-            $deliveryFee = $this->deliveryFees->for(app('tenant'), $data['fulfillment_type'] ?? 'delivery');
+            $deliveryFee = $this->deliveryFees->for($tenant, $data['fulfillment_type'] ?? 'delivery');
 
             $order = Order::create([
                 'order_number' => $this->generateOrderNumber('ONL'),
@@ -140,12 +172,18 @@ class OrderService
                     ? ($data['delivery_address'] ?? null)
                     : null,
                 'subtotal' => $subtotal,
-                'discount_amount' => 0,
+                // Snapshotted like the fee below: withdrawing a promotion must
+                // not change what this customer was charged for it.
+                'discount_amount' => $discount,
                 'tax_amount' => 0,
                 // Snapshotted: raising the shop's fee must not change what this
                 // customer was charged.
                 'delivery_fee' => $deliveryFee,
-                'total' => $this->calculateTotal($subtotal, 0, 0, $deliveryFee),
+                'total' => $this->calculateTotal($subtotal, $discount, 0, $deliveryFee),
+                // See createPosOrder(). tenants.currency is immutable precisely
+                // so history stays readable, which is what makes snapshotting
+                // it here safe rather than redundant.
+                'currency' => $tenant->currency,
             ]);
 
             $this->createOrderItems($order, $lines);
@@ -339,10 +377,8 @@ class OrderService
     {
         return collect($items)->map(function (array $line) {
             $variant = ProductVariant::with('product')->findOrFail($line['product_variant_id']);
-            $quantity = (float) $line['quantity'];
-            $lineTotal = round((float) $variant->selling_price * $quantity, 2);
 
-            return compact('variant', 'quantity', 'lineTotal');
+            return $this->priceLine($variant, (float) $line['quantity']);
         });
     }
 
@@ -351,22 +387,74 @@ class OrderService
      * separate rather than a mode flag on resolveCartLines(): the two have
      * different trust boundaries, and one method with a flag makes it easy to
      * wire the wrong lookup to the wrong route.
+     *
+     * is_active is filtered on variant AND product, the same condition
+     * StorePublicOrderRequest validates. Deliberately duplicated rather than
+     * trusted from validation — the same defence-in-depth reason this method
+     * re-resolves price and existence instead of taking them from the request.
+     * Note the POS path above is deliberately NOT filtered this way: a cashier
+     * selling the last of a discontinued line over the counter is legitimate,
+     * and staff choosing a variant is a different trust boundary from a public
+     * link that may be months old.
      */
     private function resolveCartLinesBySlug(array $items): Collection
     {
         return collect($items)->map(function (array $line) {
-            $variant = ProductVariant::with('product')->where('slug', $line['product_variant_slug'])->firstOrFail();
-            $quantity = (float) $line['quantity'];
-            $lineTotal = round((float) $variant->selling_price * $quantity, 2);
+            $variant = ProductVariant::with('product')
+                ->where('slug', $line['product_variant_slug'])
+                ->where('is_active', true)
+                ->whereHas('product', fn ($query) => $query->where('is_active', true))
+                ->firstOrFail();
 
-            return compact('variant', 'quantity', 'lineTotal');
+            return $this->priceLine($variant, (float) $line['quantity']);
         });
     }
 
     /**
-     * The one definition of what an order costs. Written out in full though
-     * discount and tax are 0 today, so the POS and storefront paths can't
-     * rediscover the arithmetic separately and disagree.
+     * What one cart line costs. The ONE place a variant's price becomes money,
+     * shared by both resolvers so the POS and the storefront can never price
+     * the same item differently.
+     *
+     * The discount is read off the variant here and now, never from the
+     * request — a reduction a client can send is a reduction a customer can
+     * invent, exactly the rule that keeps delivery_fee and tenant_id out of
+     * request input. A discount that expires between the customer loading the
+     * page and submitting the cart is therefore charged at full price, which
+     * is the correct direction: the server decides what a thing costs.
+     *
+     * Three figures, not one, because they answer three different questions
+     * downstream: lineSubtotal is what it would have cost, lineDiscount is
+     * what the shop gave away, lineTotal is what is owed.
+     *
+     * @return array{variant: ProductVariant, quantity: float, lineSubtotal: float, lineDiscount: float, lineTotal: float}
+     */
+    private function priceLine(ProductVariant $variant, float $quantity): array
+    {
+        $lineSubtotal = round((float) $variant->selling_price * $quantity, 2);
+        // Per unit, then multiplied — not a percentage taken off the line.
+        // The unit figure is what a receipt prints, so unit_price x quantity
+        // minus discount_amount reconciles exactly against the printed lines.
+        $lineDiscount = round($variant->discountPerUnit() * $quantity, 2);
+
+        return [
+            'variant' => $variant,
+            'quantity' => $quantity,
+            'lineSubtotal' => $lineSubtotal,
+            'lineDiscount' => $lineDiscount,
+            'lineTotal' => round($lineSubtotal - $lineDiscount, 2),
+        ];
+    }
+
+    /**
+     * The one definition of what an order costs. The discount is now real —
+     * the sum of the per-line reductions — while tax is still 0; the
+     * arithmetic stays written out in full so the POS and storefront paths
+     * can't rediscover it separately and disagree.
+     *
+     * $subtotal is GROSS: quantity x list price, before any discount. The
+     * discount is subtracted exactly once, here, which is why the line
+     * resolvers report lineSubtotal and lineDiscount separately rather than
+     * only a net figure.
      *
      * The delivery fee adds to what the customer pays; it's excluded only
      * from margin reporting (Order::GOODS_REVENUE_SQL).
@@ -389,13 +477,27 @@ class OrderService
             // counts — that customer is waiting either way.
             $isPreorder = $deducted->track_stock && (float) $deducted->current_stock < 0;
 
+            // What this line must be paid up front, snapshotted. Only a line
+            // that ACTUALLY went below zero carries a deposit: a variant with
+            // stock in hand ships now and is governed by the payment method
+            // alone, whatever percentage the shop has set for when it runs out.
+            $depositPercent = $isPreorder ? (int) $deducted->preorder_deposit_percent : 0;
+            $deposit = $depositPercent > 0
+                ? round($line['lineTotal'] * $depositPercent / 100, 2)
+                : 0.0;
+
             // After the deduction for the same reason as above: only the real
             // balance knows this line went below zero. One offending line
             // refuses the whole order — an order carries a single payment
             // method, so part-paying one line isn't expressible. A null method
             // is a POS sale, already paid at the counter.
-            if ($isPreorder
-                && $deducted->preorder_requires_prepayment
+            //
+            // ANY deposit needs a method that collects something up front, not
+            // just a 100% one: cash on delivery collects nothing at the moment
+            // of ordering, so "half now" is exactly as impossible on it as
+            // "all now". The percentage decides HOW MUCH is taken, never
+            // WHETHER the method can take it.
+            if ($deposit > 0
                 && $order->payment_method !== null
                 && ! PaymentMethodCatalog::collectsUpfront($order->payment_method)) {
                 throw new PreorderRequiresPrepaymentException($deducted);
@@ -414,7 +516,14 @@ class OrderService
                 'is_preorder' => $isPreorder,
                 // Only on a line that's actually waiting.
                 'preorder_lead_time_days' => $isPreorder ? $deducted->preorder_lead_time_days : null,
+                'deposit_amount' => $deposit,
+                // The LIST price, with the reduction recorded beside it rather
+                // than folded into it. Writing the discounted figure here would
+                // lose the fact that a promotion happened at all, and "what did
+                // this month's sale cost us" would stop being answerable.
+                // line_total is net of it.
                 'unit_price' => $variant->selling_price,
+                'discount_amount' => $line['lineDiscount'],
                 'unit_cost' => $variant->buying_price,
                 'line_total' => $line['lineTotal'],
             ]);

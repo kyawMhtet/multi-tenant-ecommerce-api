@@ -6,12 +6,9 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 /**
- * Admin-facing only: exposes buying_price/current_stock via the nested
- * variant. There's no separate public/storefront resource yet because
- * there's no storefront route to serve it — a StorefrontProductResource
- * (name/description/selling_price only, no buying_price or stock counts)
- * needs to exist before any unauthenticated route returns product data.
- * Never reuse this resource for that route when it's built.
+ * Admin-facing only. Never reuse it on a storefront route — that's
+ * StorefrontProductResource. The nested variant withholds buying_price from a
+ * cashier; see ProductVariantResource.
  */
 class ProductResource extends JsonResource
 {

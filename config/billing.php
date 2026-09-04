@@ -172,6 +172,29 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Transfer intent expiry
+    |--------------------------------------------------------------------------
+    |
+    | How long an unpaid transfer invoice with no screenshot stays reusable
+    | before it is treated as abandoned.
+    |
+    | Asking for bank details raises an invoice — it has to, because the
+    | invoice is what carries the SUB-nn reference the shop quotes in the
+    | transfer note. But a shop that asked and never sent anything leaves that
+    | invoice behind, still quoting a period that has since gone by. Reusing it
+    | months later would bill them for a month already over.
+    |
+    | So a stale one is voided and replaced with a fresh quote the next time
+    | the shop asks. Generous by default: a transfer genuinely can take weeks
+    | on this rail, and voiding something a shop is mid-way through paying
+    | would be far worse than leaving a dead row around a little longer.
+    |
+    */
+
+    'transfer_intent_expiry_days' => (int) env('BILLING_TRANSFER_INTENT_EXPIRY_DAYS', 30),
+
+    /*
+    |--------------------------------------------------------------------------
     | Stripe (platform account)
     |--------------------------------------------------------------------------
     |

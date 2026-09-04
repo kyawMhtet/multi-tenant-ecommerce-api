@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Order;
 use App\Models\Product;
 use App\Models\ProductVariant;
+use App\Services\Tenants\BusinessDay;
 use Illuminate\Support\Facades\DB;
 
 class DashboardService
@@ -16,9 +17,16 @@ class DashboardService
      */
     public function getSummary(): array
     {
-        $today = now()->toDateString();
+        // The SHOP's day, not UTC's. tenants.timezone exists because Yangon
+        // is UTC+06:30 and Bangkok UTC+07:00 — reading "today" off the server
+        // clock put every sale a Yangon shop made before 06:30 into
+        // yesterday's card.
+        [$dayStart, $dayEnd] = BusinessDay::todayRange();
 
-        $todayOrders = Order::whereDate('created_at', $today);
+        // A bare timestamp comparison rather than whereDate(): DATE(created_at)
+        // wraps the column in a function, so no index on it can ever be used.
+        $todayOrders = Order::where('created_at', '>=', $dayStart)
+            ->where('created_at', '<', $dayEnd);
 
         // Same constant as ReportService, so the today card and the range
         // report can't disagree about the same day's sales.

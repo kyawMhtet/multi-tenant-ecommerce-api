@@ -21,6 +21,8 @@ return Application::configure(basePath: dirname(__DIR__))
             'subscription' => \App\Http\Middleware\RequireWriteAccess::class,
             // Route-level plan gate: 'plan:profit_reports'.
             'plan' => \App\Http\Middleware\RequirePlanFeature::class,
+            // Shop-side role floor: 'role:manager' means manager or above.
+            'role' => \App\Http\Middleware\EnsureShopRole::class,
             // Platform staff, not shop staff. Asserts the Sanctum token
             // belongs to a PlatformAdmin — auth:sanctum alone does not,
             // because tokens are polymorphic.
@@ -55,6 +57,7 @@ return Application::configure(basePath: dirname(__DIR__))
             \Illuminate\Auth\Middleware\Authenticate::class,
             \App\Http\Middleware\ResolveTenant::class,
             \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            \App\Http\Middleware\EnsureShopRole::class,
             \App\Http\Middleware\RequireWriteAccess::class,
             \App\Http\Middleware\RequirePlanFeature::class,
             \App\Http\Middleware\EnsurePlatformAdmin::class,

@@ -49,3 +49,38 @@ test('a logged in user can log out and the token is revoked', function () {
 
     expect($user->tokens()->count())->toBe(0);
 });
+
+test('me returns the signed-in user and their current role', function () {
+    [$tenant, $owner] = makeTenantUser();
+    $token = $owner->createToken('t')->plainTextToken;
+
+    $this->withHeader('Authorization', "Bearer {$token}")
+        ->getJson('/api/v1/me')
+        ->assertOk()
+        ->assertJsonPath('data.email', $owner->email)
+        ->assertJsonPath('data.role', 'owner')
+        ->assertJsonPath('data.tenant_slug', $tenant->slug);
+});
+
+test('me reflects a role change without re-login', function () {
+    [$tenant, $owner] = makeTenantUser();
+    $staff = \App\Models\User::create([
+        'tenant_id' => $tenant->id,
+        'name' => 'Mya',
+        'email' => 'mya@shop.test',
+        'password' => \Illuminate\Support\Facades\Hash::make('password'),
+        'role' => 'manager',
+    ]);
+    $token = $staff->createToken('t')->plainTextToken;
+
+    $staff->update(['role' => 'cashier']);
+
+    $this->withHeader('Authorization', "Bearer {$token}")
+        ->getJson('/api/v1/me')
+        ->assertOk()
+        ->assertJsonPath('data.role', 'cashier');
+});
+
+test('me requires authentication', function () {
+    $this->getJson('/api/v1/me')->assertStatus(401);
+});

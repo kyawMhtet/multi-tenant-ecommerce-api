@@ -32,6 +32,15 @@ class SubscriptionReviewController extends Controller
     }
 
     /**
+     * Shops that asked how to pay and sent nothing. A chase list — nothing
+     * here is actionable, which is exactly why it is not in the queue.
+     */
+    public function awaitingTransfer(): JsonResponse
+    {
+        return PlatformInvoiceResource::collection($this->review->awaitingTransfer())->response();
+    }
+
+    /**
      * The full ledger, as opposed to pending() above which is the review
      * QUEUE. Different question: history to reconcile against a bank
      * statement, rather than work waiting to be done.

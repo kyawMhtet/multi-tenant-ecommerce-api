@@ -94,6 +94,7 @@ class ProductService
     public function addVariant(Product $product, array $variantData): ProductVariant
     {
         $this->ensureMayPreorder($variantData);
+        $variantData = $this->clearedDiscount($variantData);
 
         return DB::transaction(function () use ($product, $variantData) {
             $variant = $this->createVariantRow($product, Arr::except($variantData, ['images']));
@@ -130,6 +131,7 @@ class ProductService
         abort_unless($variant->product_id === $product->id, 404, 'Variant not found.');
 
         $this->ensureMayPreorder($data);
+        $data = $this->clearedDiscount($data);
 
         return DB::transaction(function () use ($variant, $data) {
             $variant->update(Arr::except($data, ['images', 'remove_image_ids']));
@@ -306,6 +308,32 @@ class ProductService
      * require the plan that turned it on, or a downgraded shop would be stuck
      * with it.
      */
+    /**
+     * A discount is withdrawn by sending discount_type: null, and the value
+     * and window go with it. Otherwise a variant keeps "50% until Friday"
+     * sitting in the admin form describing a promotion that no longer exists,
+     * and the next person to re-enable percent inherits a stale figure.
+     *
+     * Keyed on the key being PRESENT, not on it being empty: a PATCH that
+     * never mentions the discount must leave it entirely alone, the same way
+     * a PATCH without selling_price doesn't reprice the item.
+     *
+     * Not plan-gated, unlike ensureMayPreorder(). Running a promotion is
+     * ordinary retail rather than a paid capability — the same call made
+     * about dispatch tracking, which looked like a classic upsell and would
+     * have gated the product instead of an extra.
+     */
+    private function clearedDiscount(array $variantData): array
+    {
+        if (array_key_exists('discount_type', $variantData) && $variantData['discount_type'] === null) {
+            $variantData['discount_value'] = 0;
+            $variantData['discount_starts_at'] = null;
+            $variantData['discount_ends_at'] = null;
+        }
+
+        return $variantData;
+    }
+
     private function ensureMayPreorder(array $variantData): void
     {
         if (! empty($variantData['allow_preorder'])) {
@@ -324,7 +352,7 @@ class ProductService
                     'track_stock' => true,
                     'current_stock' => 0,
                     'allow_preorder' => false,
-                    'preorder_requires_prepayment' => false,
+                    'preorder_deposit_percent' => 0,
                     // System-generated, never accepted from request input.
                     'slug' => $this->generateVariantSlug(),
                 ], $variantData));

@@ -21,6 +21,7 @@ use App\Http\Controllers\Api\PublicPaymentMethodController;
 use App\Http\Controllers\Api\PublicProductController;
 use App\Http\Controllers\Api\PublicShopController;
 use App\Http\Controllers\Api\ReportController;
+use App\Http\Controllers\Api\StaffController;
 use App\Http\Controllers\Api\StripeConnectController;
 use App\Http\Controllers\Api\TenantController;
 use Illuminate\Support\Facades\Route;
@@ -106,6 +107,10 @@ Route::prefix('v1')->group(function () {
             Route::post('/billing/invoices/{invoice}/reject', [SubscriptionReviewController::class, 'reject'])
                 ->whereNumber('invoice');
 
+            // Asked for bank details, sent nothing. A chase list, deliberately
+            // kept out of the queue above — there is nothing to rule on.
+            Route::get('/billing/awaiting-transfer', [SubscriptionReviewController::class, 'awaitingTransfer']);
+
             // The full ledger, as opposed to the queue above: history to
             // reconcile against a bank statement.
             Route::get('/billing/invoices', [SubscriptionReviewController::class, 'invoices']);
@@ -135,6 +140,7 @@ Route::prefix('v1')->group(function () {
     });
 
     Route::middleware('auth:sanctum')->group(function () {
+        Route::get('/me', [AuthController::class, 'me']);
         Route::post('/logout', [AuthController::class, 'logout']);
 
         Route::middleware('tenant')->group(function () {
@@ -147,7 +153,7 @@ Route::prefix('v1')->group(function () {
             // Catalogue and inventory CHANGES. A lapsed shop keeps selling
             // and fulfilling what it already has; what it loses is the
             // ability to grow the catalogue.
-            Route::middleware('subscription')->group(function () {
+            Route::middleware(['role:manager', 'subscription'])->group(function () {
                 Route::apiResource('products', ProductController::class)->except(['index', 'show']);
                 Route::post('/products/{product}/variants', [ProductVariantController::class, 'store']);
                 Route::match(['put', 'patch'], '/products/{product}/variants/{variant}', [ProductVariantController::class, 'update']);
@@ -161,8 +167,10 @@ Route::prefix('v1')->group(function () {
             Route::match(['put', 'patch'], '/orders/{order}', [OrderController::class, 'update']);
             // Distinct actions, not status edits — each carries required
             // inputs and an audit trail a generic update can't enforce.
-            Route::post('/orders/{order}/cancel', [OrderController::class, 'cancel']);
-            Route::post('/orders/{order}/refund', [OrderController::class, 'refund']);
+            Route::post('/orders/{order}/cancel', [OrderController::class, 'cancel'])
+                ->middleware('role:manager');
+            Route::post('/orders/{order}/refund', [OrderController::class, 'refund'])
+                ->middleware('role:manager');
             Route::post('/orders/{order}/dispatch', [OrderController::class, 'dispatch']);
 
             // Per-tenant, not a platform catalogue: couriers are regional and
@@ -173,7 +181,7 @@ Route::prefix('v1')->group(function () {
             // this market actually trade — gating it would gate the product.
             // See the note at the bottom of PlanFeature.
             Route::get('/delivery-providers', [DeliveryProviderController::class, 'index']);
-            Route::middleware('subscription')->group(function () {
+            Route::middleware(['role:manager', 'subscription'])->group(function () {
                 Route::post('/delivery-providers', [DeliveryProviderController::class, 'store']);
                 Route::match(['put', 'patch'], '/delivery-providers/{provider}', [DeliveryProviderController::class, 'update']);
                 Route::delete('/delivery-providers/{provider}', [DeliveryProviderController::class, 'destroy']);
@@ -182,23 +190,24 @@ Route::prefix('v1')->group(function () {
             // The only place unit_cost margins surface, and the clearest
             // reason a growing shop upgrades.
             Route::get('/reports/sales-profit', [ReportController::class, 'salesProfit'])
-                ->middleware('plan:profit_reports');
+                ->middleware(['role:manager', 'plan:profit_reports']);
             Route::get('/tenant', [TenantController::class, 'show']);
             // Multipart can't be sent via a real PUT/PATCH, so clients POST
             // with _method — Route::match accepts both.
-            Route::match(['put', 'patch'], '/tenant', [TenantController::class, 'update']);
+            Route::match(['put', 'patch'], '/tenant', [TenantController::class, 'update'])
+                ->middleware('role:owner');
             // No route takes a tenant parameter — all act on app('tenant'),
             // derived from the authenticated user, so a shop can only ever
             // touch its own. index() returns the full catalogue so the
             // settings screen doesn't need its own copy of what's possible.
             Route::get('/payments/methods', [PaymentMethodController::class, 'index']);
             Route::post('/payments/methods', [PaymentMethodController::class, 'upsert'])
-                ->middleware('subscription');
+                ->middleware(['role:owner', 'subscription']);
             // Gated as a pair. status() is a read, but a shop that cannot
             // have a connected account has nothing to read, and leaving it
             // open would let the settings screen offer an onboarding button
             // that 402s on click.
-            Route::middleware('plan:card_payments')->group(function () {
+            Route::middleware(['role:owner', 'plan:card_payments'])->group(function () {
                 Route::get('/payments/stripe/status', [StripeConnectController::class, 'status']);
                 Route::post('/payments/stripe/onboarding-link', [StripeConnectController::class, 'link'])
                     ->middleware('subscription');
@@ -208,13 +217,22 @@ Route::prefix('v1')->group(function () {
             // reach these — gating the renew button behind an active
             // subscription is the one bug here a customer could not recover
             // from without support.
-            Route::get('/billing', [BillingController::class, 'show']);
-            Route::get('/billing/invoices', [BillingController::class, 'invoices']);
-            Route::post('/billing/subscribe', [BillingController::class, 'subscribe']);
+            Route::middleware('role:owner')->group(function () {
+                Route::get('/billing', [BillingController::class, 'show']);
+                Route::get('/billing/invoices', [BillingController::class, 'invoices']);
+                Route::post('/billing/subscribe', [BillingController::class, 'subscribe']);
             // The shop's transfer screenshot. Uploading it settles NOTHING —
             // the invoice stays pending until a human here approves it.
-            Route::post('/billing/invoices/{invoice}/proof', [BillingController::class, 'proof']);
-            Route::post('/billing/cancel', [BillingController::class, 'cancel']);
+                Route::post('/billing/invoices/{invoice}/proof', [BillingController::class, 'proof']);
+                Route::post('/billing/cancel', [BillingController::class, 'cancel']);
+
+                // Seat count is a plan limit, so adding a staff member is a
+                // CREATE and 402s at the ceiling like any other.
+                Route::get('/staff', [StaffController::class, 'index']);
+                Route::post('/staff', [StaffController::class, 'store'])->middleware('subscription');
+                Route::match(['put', 'patch'], '/staff/{staff}', [StaffController::class, 'update'])->whereNumber('staff');
+                Route::delete('/staff/{staff}', [StaffController::class, 'destroy'])->whereNumber('staff');
+            });
 
             Route::get('/notifications', [NotificationController::class, 'index']);
             Route::get('/notifications/unread-count', [NotificationController::class, 'unreadCount']);

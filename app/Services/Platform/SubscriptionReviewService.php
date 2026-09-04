@@ -35,22 +35,39 @@ use Illuminate\Support\Facades\Notification;
 class SubscriptionReviewService
 {
     /**
-     * Transfers waiting on a human, newest claim last.
+     * Transfers waiting on a human decision — and ONLY those.
      *
-     * Includes invoices with NO proof uploaded, ordered after those that have
-     * one. A shop that asked for bank details and then went quiet is worth
-     * seeing — it is either a payment that arrived without a screenshot, or a
-     * shop that needs chasing — and hiding those would make the queue look
-     * finished when it isn't.
+     * Proof-carrying invoices only, oldest first. Invoices where the shop
+     * asked for bank details and sent nothing have no decision to make and
+     * used to sit in this same list, which meant the queue answered two
+     * different questions at once: "what must I rule on" and "who hasn't
+     * paid". A queue you have to visually filter is not a queue.
+     *
+     * Those live in awaitingTransfer() instead. They are not hidden — a
+     * payment that arrives WITHOUT a screenshot has to stay findable, or
+     * there would be no invoice to approve when the money turns up.
      */
     public function pending(int $perPage = 25): LengthAwarePaginator
     {
         return SubscriptionInvoice::withoutGlobalScope(TenantScope::class)
-            ->unpaid()
-            ->where('gateway', 'manual')
+            ->awaitingApproval()
             ->with('tenant')
-            ->orderByRaw('proof_path is null')
-            ->orderBy('created_at')
+            ->paginate($perPage);
+    }
+
+    /**
+     * Shops that asked how to pay and have sent nothing yet.
+     *
+     * A chase list, not a work queue — nothing here can be approved, because
+     * there is nothing to look at. Kept visible because a shop that transfers
+     * and forgets to upload is a real and common case on this rail, and the
+     * money arriving with no screenshot needs an invoice to land against.
+     */
+    public function awaitingTransfer(int $perPage = 25): LengthAwarePaginator
+    {
+        return SubscriptionInvoice::withoutGlobalScope(TenantScope::class)
+            ->awaitingTransfer()
+            ->with('tenant')
             ->paginate($perPage);
     }
 
@@ -103,27 +120,30 @@ class SubscriptionReviewService
 
             $this->refuseNonManual($invoice);
 
+            $subscription = Subscription::withoutGlobalScope(TenantScope::class)
+                ->whereKey($invoice->subscription_id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            [$periodStart, $periodEnd] = $this->grantedPeriod($subscription, $invoice);
+
             $invoice->update([
                 'status' => 'paid',
                 'paid_at' => now(),
                 'reviewed_by' => $admin->id,
                 'reviewed_at' => now(),
                 'note' => $note,
+                // Corrected to what was actually granted, so the ledger never
+                // claims a period the shop did not receive.
+                'period_start' => $periodStart,
+                'period_end' => $periodEnd,
             ]);
-
-            $subscription = Subscription::withoutGlobalScope(TenantScope::class)
-                ->whereKey($invoice->subscription_id)
-                ->lockForUpdate()
-                ->firstOrFail();
 
             $subscription->update([
                 ...$this->planChange($subscription, $invoice),
                 'status' => 'active',
                 'gateway' => 'manual',
-                // period_end was computed from where access already ended, so
-                // paying late does not lose time and paying early extends
-                // rather than resets.
-                'current_period_ends_at' => $invoice->period_end,
+                'current_period_ends_at' => $periodEnd,
                 // An approved payment un-cancels: a shop that cancelled and
                 // then paid has plainly changed its mind.
                 'cancel_at_period_end' => false,
@@ -191,6 +211,42 @@ class SubscriptionReviewService
 
             return $subscription;
         });
+    }
+
+    /**
+     * The period the shop actually gets, which is NOT always the one printed
+     * on the invoice.
+     *
+     * The dates are computed when the invoice is RAISED, but on the manual
+     * rail the money is confirmed days or weeks later — the shop has to
+     * transfer, it has to arrive, and then a human here has to look at it.
+     * Honouring a stale period meant a shop could pay, be approved, and be
+     * read-only the same second because the month it bought had already
+     * elapsed. It had paid for nothing.
+     *
+     * So: if the quoted period is still live, honour it exactly — that is what
+     * the shop was told, and it preserves paying-early-extends. If it has
+     * already run out, grant the same LENGTH from now (or from the end of any
+     * period still paid for, so nothing is lost by approving early).
+     *
+     * Length is carried over from the invoice rather than assuming a month, so
+     * this keeps working if a plan is ever billed over a different interval.
+     *
+     * @return array{0: \Illuminate\Support\Carbon, 1: \Illuminate\Support\Carbon}
+     */
+    private function grantedPeriod(Subscription $subscription, SubscriptionInvoice $invoice): array
+    {
+        if ($invoice->period_end->isFuture()) {
+            return [$invoice->period_start, $invoice->period_end];
+        }
+
+        $days = max(1, $invoice->period_start->diffInDays($invoice->period_end));
+
+        $start = $subscription->current_period_ends_at?->isFuture()
+            ? $subscription->current_period_ends_at->copy()
+            : now();
+
+        return [$start, $start->copy()->addDays($days)];
     }
 
     /**

@@ -28,6 +28,20 @@ class AuthController extends Controller
     }
 
     /**
+     * The signed-in user, so a client that reloads with a stored token can
+     * recover its identity and role rather than trusting a cached copy that
+     * goes stale the moment an owner changes someone's role.
+     *
+     * Outside the 'tenant' middleware on purpose: a suspended shop's owner
+     * must still be able to identify themselves, so the admin app can render
+     * the suspension notice rather than an anonymous error.
+     */
+    public function me(Request $request): JsonResponse
+    {
+        return (new UserResource($request->user()->load('tenant')))->response();
+    }
+
+    /**
      * Returns the created account but NO token — registering is not signing
      * in. The client sends the owner to /login, where they enter the password
      * they just chose.

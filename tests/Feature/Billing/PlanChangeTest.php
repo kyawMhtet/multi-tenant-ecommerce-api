@@ -192,10 +192,12 @@ test('choosing a different plan before paying voids the earlier invoice', functi
         // Only the live one can be paid or reused.
         ->and(SubscriptionInvoice::withoutGlobalScope(TenantScope::class)->unpaid()->count())->toBe(1);
 
-    // ...and the review queue shows one item, not two.
-    actingAsPlatform()->getJson('/api/v1/platform/billing/pending')
+    // ...and staff see one outstanding intent, not two. It sits on the chase
+    // list rather than the review queue, because no screenshot exists yet.
+    actingAsPlatform()->getJson('/api/v1/platform/billing/awaiting-transfer')
         ->assertOk()
-        ->assertJsonCount(1, 'data');
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.id', $second->id);
 });
 
 /**
@@ -242,4 +244,85 @@ test('cancelling the card subscription reopens the transfer rail', function () {
 
     expect($invoice)->not->toBeNull()
         ->and($invoice->plan)->toBe('starter');
+});
+
+// ---------------------------------------------------------------------------
+// Paying for the same plan again
+// ---------------------------------------------------------------------------
+
+test('asking to renew twice reuses one invoice, and each approval stacks a month', function () {
+    $endsAt = now()->addDays(10);
+    [$tenant] = thbShop(['plan' => 'starter', 'gateway' => 'manual', 'current_period_ends_at' => $endsAt]);
+
+    $first = requestTransferForTenant($tenant, 'starter');
+    $again = requestTransferForTenant($tenant, 'starter');
+
+    // Clicking twice cannot leave the shop owing two months.
+    expect($again->id)->toBe($first->id);
+
+    $platform = actingAsPlatform();
+    $platform->postJson("/api/v1/platform/billing/invoices/{$first->id}/approve")->assertOk();
+
+    expect($tenant->fresh()->subscription->current_period_ends_at->toDateString())
+        ->toBe($endsAt->copy()->addMonth()->toDateString());
+
+    // Paying ahead again stacks from the NEW end, so a shop can prepay.
+    $second = requestTransferForTenant($tenant->fresh(), 'starter');
+    $platform->postJson("/api/v1/platform/billing/invoices/{$second->id}/approve")->assertOk();
+
+    expect($tenant->fresh()->subscription->current_period_ends_at->toDateString())
+        ->toBe($endsAt->copy()->addMonths(2)->toDateString());
+});
+
+/**
+ * The period is computed when the invoice is RAISED, but on the manual rail
+ * the money is confirmed days or weeks later — transfer, arrival, then a human
+ * looking at it. Honouring a stale period meant a shop could pay, be approved,
+ * and be read-only the same second because the month it bought had already
+ * gone by. It had paid for nothing.
+ */
+test('an approval that arrives after the quoted period still grants a full month', function () {
+    [$tenant] = thbShop([
+        'plan' => 'starter',
+        'status' => 'past_due',
+        'gateway' => 'manual',
+        'current_period_ends_at' => now()->subWeeks(6),
+    ]);
+
+    $invoice = createTransferInvoice($tenant, [
+        'plan' => 'starter',
+        'period_start' => now()->subWeeks(6),
+        'period_end' => now()->subWeeks(2), // entirely in the past
+    ]);
+
+    actingAsPlatform()->postJson("/api/v1/platform/billing/invoices/{$invoice->id}/approve")->assertOk();
+
+    $subscription = $tenant->fresh()->subscription;
+
+    expect($subscription->status)->toBe('active')
+        // The whole point: the shop paid, so the shop can work.
+        ->and($subscription->allowsWrites())->toBeTrue()
+        ->and($subscription->current_period_ends_at->isFuture())->toBeTrue();
+
+    // ...and the ledger records what was actually granted, not a period the
+    // shop never received.
+    $settled = App\Models\SubscriptionInvoice::withoutGlobalScope(TenantScope::class)->find($invoice->id);
+    expect($settled->period_end->isFuture())->toBeTrue();
+});
+
+/**
+ * A live quoted period is honoured exactly — that is what the shop was told,
+ * and it is what makes paying early extend rather than reset.
+ */
+test('an approval inside the quoted period honours it unchanged', function () {
+    $endsAt = now()->addDays(20);
+    [$tenant] = thbShop(['plan' => 'starter', 'gateway' => 'manual', 'current_period_ends_at' => $endsAt]);
+
+    $invoice = requestTransferForTenant($tenant, 'starter');
+    $quotedEnd = $invoice->period_end->copy();
+
+    actingAsPlatform()->postJson("/api/v1/platform/billing/invoices/{$invoice->id}/approve")->assertOk();
+
+    expect($tenant->fresh()->subscription->current_period_ends_at->toDateString())
+        ->toBe($quotedEnd->toDateString());
 });

@@ -2,6 +2,7 @@
 
 use App\Models\Concerns\TenantScope;
 use App\Models\SubscriptionInvoice;
+use Illuminate\Support\Facades\Storage;
 
 /**
  * Approving a transfer is the manual rail's equivalent of a payment webhook —
@@ -36,23 +37,41 @@ test('the pending queue spans every tenant', function () {
 });
 
 /**
- * A shop that asked for bank details and went quiet is either a payment that
- * arrived without a screenshot or a shop that needs chasing. Hiding those
- * would make the queue look finished when it isn't — but the actionable ones
- * come first.
+ * The queue answers ONE question: what must I rule on. A shop that asked for
+ * bank details and sent nothing has no decision attached to it, so it belongs
+ * on a chase list instead — mixing them meant the queue had to be visually
+ * filtered before it could be worked.
  */
-test('transfers with no screenshot are listed, after those that have one', function () {
+test('the queue holds only transfers with a screenshot to look at', function () {
     [$tenant] = makeTenantUser();
 
     createTransferInvoice($tenant, ['proof_path' => null]);
-    createTransferInvoice($tenant, ['proof_path' => 'billing-proofs/real.jpg']);
+    $withProof = createTransferInvoice($tenant, ['proof_path' => 'billing-proofs/real.jpg']);
 
-    $data = actingAsPlatform()->getJson('/api/v1/platform/billing/pending')
+    $queue = actingAsPlatform()->getJson('/api/v1/platform/billing/pending')
         ->assertOk()->json('data');
 
-    expect($data)->toHaveCount(2)
-        ->and($data[0]['proof_url'])->not->toBeNull()
-        ->and($data[1]['proof_url'])->toBeNull();
+    expect($queue)->toHaveCount(1)
+        ->and($queue[0]['id'])->toBe($withProof->id)
+        ->and($queue[0]['proof_url'])->not->toBeNull();
+});
+
+/**
+ * NOT hidden, though: a shop that transfers and forgets to upload is common on
+ * this rail, and the money arriving needs an invoice to land against.
+ */
+test('shops that asked how to pay and sent nothing are still visible', function () {
+    [$tenant] = makeTenantUser();
+
+    $silent = createTransferInvoice($tenant, ['proof_path' => null]);
+    createTransferInvoice($tenant, ['proof_path' => 'billing-proofs/real.jpg']);
+
+    $chase = actingAsPlatform()->getJson('/api/v1/platform/billing/awaiting-transfer')
+        ->assertOk()->json('data');
+
+    expect($chase)->toHaveCount(1)
+        ->and($chase[0]['id'])->toBe($silent->id)
+        ->and($chase[0]['proof_url'])->toBeNull();
 });
 
 test('approving settles the invoice and moves the shop onto the plan it paid for', function () {
@@ -284,4 +303,128 @@ test('a refused ruling notifies nobody', function () {
         ->assertStatus(422);
 
     expect($user->fresh()->notifications()->count())->toBe(0);
+});
+
+/**
+ * An intent raised months ago still quotes a period that has gone by. Handing
+ * it back would bill the shop for a month already over, and it would sit on
+ * the chase list forever. Cleaned up lazily when the shop returns — the dates
+ * already say when it went stale, so no scheduler is involved.
+ */
+test('an abandoned transfer intent is voided and re-quoted when the shop returns', function () {
+    config()->set('billing.currencies.THB.manual', [
+        'bank_name' => 'Bangkok Bank', 'account_name' => 'Shop SaaS',
+        'account_number' => 'TH-1', 'instructions' => null,
+    ]);
+
+    [$tenant] = makeTenantUser(tenantOverrides: ['currency' => 'THB']);
+    subscribeTenant($tenant, ['plan' => 'starter', 'gateway' => 'manual']);
+
+    $abandoned = createTransferInvoice($tenant, ['plan' => 'starter', 'proof_path' => null]);
+    $abandoned->forceFill([
+        'created_at' => now()->subDays(config('billing.transfer_intent_expiry_days') + 1),
+    ])->save();
+
+    $fresh = requestTransferForTenant($tenant, 'starter');
+
+    expect($fresh->id)->not->toBe($abandoned->id)
+        ->and($abandoned->fresh()->status)->toBe('void')
+        // The new quote is current, not the dead one.
+        ->and($fresh->period_end->isFuture())->toBeTrue();
+
+    // And the chase list shows one shop, not two rows for the same one.
+    actingAsPlatform()->getJson('/api/v1/platform/billing/awaiting-transfer')
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.id', $fresh->id);
+});
+
+/**
+ * A shop mid-way through paying must not have its reference pulled out from
+ * under it — the expiry window is generous precisely because a transfer on
+ * this rail genuinely takes days.
+ */
+test('a recent unpaid intent is still reused, not voided', function () {
+    config()->set('billing.currencies.THB.manual', [
+        'bank_name' => 'Bangkok Bank', 'account_name' => 'Shop SaaS',
+        'account_number' => 'TH-1', 'instructions' => null,
+    ]);
+
+    [$tenant] = makeTenantUser(tenantOverrides: ['currency' => 'THB']);
+    subscribeTenant($tenant, ['plan' => 'starter', 'gateway' => 'manual']);
+
+    $first = requestTransferForTenant($tenant, 'starter');
+    $again = requestTransferForTenant($tenant, 'starter');
+
+    expect($again->id)->toBe($first->id)
+        ->and($first->fresh()->status)->toBe('pending');
+});
+
+/**
+ * Rejection is designed as a recoverable state: the invoice stays unpaid so
+ * the shop can transfer again and upload against the SAME reference. That
+ * recovery was silently broken — 'failed' is excluded from the review queue,
+ * and the chase list only matches invoices with no proof at all, so a
+ * re-uploaded rejection was visible to nobody and would have waited forever.
+ */
+test('a rejected transfer comes back to the queue when the shop re-uploads', function () {
+    Storage::fake('public');
+
+    [$tenant, $user] = makeTenantUser(tenantOverrides: ['currency' => 'THB']);
+    subscribeTenant($tenant, ['plan' => 'starter', 'gateway' => 'manual']);
+    $invoice = createTransferInvoice($tenant, ['plan' => 'starter']);
+
+    app(App\Services\Platform\SubscriptionReviewService::class)
+        ->reject($invoice->id, makePlatformAdmin(), 'Screenshot shows 400 THB, but 499 was due.');
+
+    // Rejected: not work for a reviewer, and not a shop that has sent nothing.
+    $review = app(App\Services\Platform\SubscriptionReviewService::class);
+    expect($review->pending()->pluck('id'))->not->toContain($invoice->id)
+        ->and($review->awaitingTransfer()->pluck('id'))->not->toContain($invoice->id);
+
+    // The shop transfers again and sends a new screenshot.
+    $this->withHeader('Authorization', 'Bearer '.$user->createToken('t')->plainTextToken)
+        ->postJson("/api/v1/billing/invoices/{$invoice->id}/proof", [
+            'proof' => Illuminate\Http\UploadedFile::fake()->image('second.jpg'),
+        ])
+        ->assertSuccessful()
+        ->assertJsonPath('data.status', 'pending');
+
+    $fresh = $invoice->fresh();
+
+    expect($fresh->status)->toBe('pending')
+        ->and($review->pending()->pluck('id'))->toContain($invoice->id)
+        // The previous ruling is kept: a second screenshot for the same wrong
+        // amount should be recognisable as such by whoever picks it up.
+        ->and($fresh->note)->toBe('Screenshot shows 400 THB, but 499 was due.')
+        ->and($fresh->reviewed_by)->not->toBeNull();
+});
+
+/**
+ * The re-uploaded claim must be settleable, not merely visible — the whole
+ * point of putting it back in the queue.
+ */
+test('a re-uploaded transfer can then be approved normally', function () {
+    Storage::fake('public');
+
+    [$tenant, $user] = makeTenantUser(tenantOverrides: ['currency' => 'THB']);
+    subscribeTenant($tenant, ['plan' => 'starter', 'gateway' => 'manual']);
+    $invoice = createTransferInvoice($tenant, ['plan' => 'pro']);
+
+    // One admin, reused: makePlatformAdmin() defaults to a fixed email, and
+    // platform_admins.email is unique.
+    $admin = makePlatformAdmin();
+    $review = app(App\Services\Platform\SubscriptionReviewService::class);
+
+    $review->reject($invoice->id, $admin, 'Wrong recipient account.');
+
+    $this->withHeader('Authorization', 'Bearer '.$user->createToken('t')->plainTextToken)
+        ->postJson("/api/v1/billing/invoices/{$invoice->id}/proof", [
+            'proof' => Illuminate\Http\UploadedFile::fake()->image('second.jpg'),
+        ])->assertSuccessful();
+
+    $review->approve($invoice->id, $admin, 'Confirmed on the statement.');
+
+    expect($invoice->fresh()->status)->toBe('paid')
+        ->and($tenant->fresh()->subscription->effectivePlan())->toBe('pro');
 });

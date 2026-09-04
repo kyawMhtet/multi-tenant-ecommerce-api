@@ -153,6 +153,73 @@ class Order extends Model
         return $this->belongsTo(User::class, 'cashier_id');
     }
 
+    /**
+     * The minimum that must be collected before this order is accepted.
+     *
+     * Summed from the SNAPSHOT on each line, not recomputed from the variant's
+     * current percentage — same rule as unit_price. A shop that changes its
+     * deposit terms next week must not retroactively change what this customer
+     * was asked for.
+     *
+     * Zero for an ordinary order: an in-stock line has nothing "due up front"
+     * of its own, and is governed by the payment method alone.
+     *
+     * Resolved cheapest-first, like hasPreorderItems(), so a paginated list
+     * never triggers a query per order.
+     */
+    public function depositDue(): float
+    {
+        if ($this->items_sum_deposit_amount !== null) {
+            return (float) $this->items_sum_deposit_amount;
+        }
+
+        if ($this->relationLoaded('items')) {
+            return round((float) $this->items->sum('deposit_amount'), 2);
+        }
+
+        return round((float) $this->items()->sum('deposit_amount'), 2);
+    }
+
+    public function requiresDeposit(): bool
+    {
+        return $this->depositDue() > 0;
+    }
+
+    /**
+     * What the customer is charged NOW — the deposit when there is one, the
+     * whole total otherwise.
+     *
+     * One definition, used by the gateway that creates the charge, the pending
+     * payment row, and the webhook that validates what came back. Three places
+     * computing this separately is how a customer gets charged one amount and
+     * credited another.
+     */
+    public function amountDueNow(): float
+    {
+        return $this->requiresDeposit() ? $this->depositDue() : (float) $this->total;
+    }
+
+    /**
+     * Money actually received, from the payments ledger rather than a column —
+     * a deposit and the balance are two separate payments against one order,
+     * and a counter could not represent that without drifting from the rows
+     * that record it. Same reasoning as the stock ledger.
+     */
+    public function amountPaid(): float
+    {
+        $payments = $this->relationLoaded('payments')
+            ? $this->payments->where('status', 'success')->sum('amount')
+            : $this->payments()->where('status', 'success')->sum('amount');
+
+        return round((float) $payments, 2);
+    }
+
+    /** What is still owed — collected on delivery for a deposit order. */
+    public function balanceDue(): float
+    {
+        return round(max(0, (float) $this->total - $this->amountPaid()), 2);
+    }
+
     public function items(): HasMany
     {
         return $this->hasMany(OrderItem::class);

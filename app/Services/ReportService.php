@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Order;
 use App\Models\OrderItem;
+use App\Services\Tenants\BusinessDay;
 use Carbon\Carbon;
 use Carbon\CarbonPeriod;
 use Illuminate\Support\Facades\DB;
@@ -18,13 +19,18 @@ class ReportService
      */
     public function getSalesProfitReport(array $filters): array
     {
-        $dateFrom = $filters['date_from'] ?? now()->startOfMonth()->toDateString();
-        $dateTo = $filters['date_to'] ?? now()->toDateString();
+        // Defaults are the SHOP's calendar, not the server's: on the first of
+        // the month a Yangon shop's "this month so far" started a day early.
+        $today = BusinessDay::today();
+        $dateFrom = $filters['date_from'] ?? Carbon::parse($today)->startOfMonth()->toDateString();
+        $dateTo = $filters['date_to'] ?? $today;
+
+        [$from, $to] = BusinessDay::range($dateFrom, $dateTo);
 
         $eligibleOrders = Order::query()
             ->whereIn('status', Order::REVENUE_STATUSES)
-            ->whereDate('created_at', '>=', $dateFrom)
-            ->whereDate('created_at', '<=', $dateTo);
+            ->where('created_at', '>=', $from)
+            ->where('created_at', '<', $to);
 
         // Goods only — see Order::GOODS_REVENUE_SQL for why.
         $revenue = round((float) (clone $eligibleOrders)->sum(DB::raw(Order::GOODS_REVENUE_SQL)), 2);
@@ -35,10 +41,10 @@ class ReportService
         // however many orders are in range. whereHas applies the same filter
         // without a join or fan-out.
         $cost = round((float) OrderItem::query()
-            ->whereHas('order', function ($query) use ($dateFrom, $dateTo) {
+            ->whereHas('order', function ($query) use ($from, $to) {
                 $query->whereIn('status', Order::REVENUE_STATUSES)
-                    ->whereDate('created_at', '>=', $dateFrom)
-                    ->whereDate('created_at', '<=', $dateTo);
+                    ->where('created_at', '>=', $from)
+                    ->where('created_at', '<', $to);
             })
             ->sum(DB::raw('unit_cost * quantity')), 2);
 
@@ -58,7 +64,7 @@ class ReportService
             'margin_percentage' => $revenue > 0 ? round(($profit / $revenue) * 100, 2) : null,
             'order_count' => $orderCount,
             'average_order_value' => $orderCount > 0 ? $this->money($revenue / $orderCount) : null,
-            'daily' => $this->getDailyBreakdown($dateFrom, $dateTo),
+            'daily' => $this->getDailyBreakdown($dateFrom, $dateTo, $from, $to),
         ];
     }
 
@@ -80,13 +86,21 @@ class ReportService
      * which an EXISTS-based whereHas can't expose. TenantScope table-qualifies
      * its where clause, so it still applies alongside the join.
      */
-    private function getDailyBreakdown(string $dateFrom, string $dateTo): array
+    private function getDailyBreakdown(string $dateFrom, string $dateTo, Carbon $from, Carbon $to): array
     {
+        // Rows are bucketed by the SHOP's local date, so a sale at 02:00 in
+        // Yangon appears on the day the shop made it. Grouping on the raw UTC
+        // DATE() put those rows on the previous day, where they also failed to
+        // match the CarbonPeriod keys below and silently vanished from the
+        // chart's endpoints.
+        $localDate = BusinessDay::localDateSql('created_at');
+        $localOrderDate = BusinessDay::localDateSql('orders.created_at');
+
         $dailyOrders = Order::query()
             ->whereIn('status', Order::REVENUE_STATUSES)
-            ->whereDate('created_at', '>=', $dateFrom)
-            ->whereDate('created_at', '<=', $dateTo)
-            ->selectRaw('DATE(created_at) as date, COUNT(*) as order_count, SUM('.Order::GOODS_REVENUE_SQL.') as revenue')
+            ->where('created_at', '>=', $from)
+            ->where('created_at', '<', $to)
+            ->selectRaw($localDate.' as date, COUNT(*) as order_count, SUM('.Order::GOODS_REVENUE_SQL.') as revenue')
             ->groupBy('date')
             ->get()
             ->keyBy('date');
@@ -94,9 +108,9 @@ class ReportService
         $dailyCost = OrderItem::query()
             ->join('orders', 'orders.id', '=', 'order_items.order_id')
             ->whereIn('orders.status', Order::REVENUE_STATUSES)
-            ->whereDate('orders.created_at', '>=', $dateFrom)
-            ->whereDate('orders.created_at', '<=', $dateTo)
-            ->selectRaw('DATE(orders.created_at) as date, SUM(order_items.unit_cost * order_items.quantity) as cost')
+            ->where('orders.created_at', '>=', $from)
+            ->where('orders.created_at', '<', $to)
+            ->selectRaw($localOrderDate.' as date, SUM(order_items.unit_cost * order_items.quantity) as cost')
             ->groupBy('date')
             ->get()
             ->keyBy('date');

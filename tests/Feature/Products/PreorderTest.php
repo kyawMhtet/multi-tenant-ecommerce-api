@@ -447,7 +447,7 @@ test('cash on delivery is refused for a preorder line that requires prepayment',
         'current_stock' => 0,
         'allow_preorder' => true,
         'preorder_lead_time_days' => 21,
-        'preorder_requires_prepayment' => true,
+        'preorder_deposit_percent' => 100,
     ])->variants->first();
 
     $this->withHeader('X-Tenant-Slug', $tenant->slug)
@@ -475,7 +475,7 @@ test('a prepaid method is accepted for the same preorder line', function () {
     $variant = createProductForTenant($tenant, variantOverrides: [
         'current_stock' => 0,
         'allow_preorder' => true,
-        'preorder_requires_prepayment' => true,
+        'preorder_deposit_percent' => 100,
     ])->variants->first();
 
     $this->withHeader('X-Tenant-Slug', $tenant->slug)
@@ -501,7 +501,7 @@ test('cash on delivery still works when the same variant has stock', function ()
     $variant = createProductForTenant($tenant, variantOverrides: [
         'current_stock' => 5,
         'allow_preorder' => true,
-        'preorder_requires_prepayment' => true,
+        'preorder_deposit_percent' => 100,
     ])->variants->first();
 
     // The flag gates preorder LINES, not the variant. With stock on hand
@@ -527,7 +527,7 @@ test('a preorder without the flag still accepts cash on delivery', function () {
     $variant = createProductForTenant($tenant, variantOverrides: [
         'current_stock' => 0,
         'allow_preorder' => true,
-        'preorder_requires_prepayment' => false,
+        'preorder_deposit_percent' => 0,
     ])->variants->first();
 
     $this->withHeader('X-Tenant-Slug', $tenant->slug)
@@ -556,7 +556,7 @@ test('one prepay-required line refuses the whole mixed cart', function () {
         'sku' => 'PHONE-9',
         'current_stock' => 0,
         'allow_preorder' => true,
-        'preorder_requires_prepayment' => true,
+        'preorder_deposit_percent' => 100,
     ])->variants->first();
 
     $this->withHeader('X-Tenant-Slug', $tenant->slug)
@@ -586,7 +586,7 @@ test('a POS preorder is unaffected, since it is paid at the counter', function (
     $variant = createProductForTenant($tenant, variantOverrides: [
         'current_stock' => 0,
         'allow_preorder' => true,
-        'preorder_requires_prepayment' => true,
+        'preorder_deposit_percent' => 100,
     ])->variants->first();
 
     $order = createPosOrderForTenant($tenant, $user, [
@@ -605,7 +605,7 @@ test('the storefront tells checkout when prepayment is required', function () {
         'slug' => 'prepay-phone',
         'current_stock' => 0,
         'allow_preorder' => true,
-        'preorder_requires_prepayment' => true,
+        'preorder_deposit_percent' => 100,
     ]);
 
     // Withheld once the item is in stock, same as the lead time — the
@@ -615,18 +615,18 @@ test('the storefront tells checkout when prepayment is required', function () {
         'sku' => 'STOCKED-1',
         'current_stock' => 5,
         'allow_preorder' => true,
-        'preorder_requires_prepayment' => true,
+        'preorder_deposit_percent' => 100,
     ]);
 
     $this->getJson('/api/v1/public/products/prepay-phone')
         ->assertOk()
         ->assertJsonPath('data.variants.0.stock_status', 'preorder')
-        ->assertJsonPath('data.variants.0.preorder_requires_prepayment', true);
+        ->assertJsonPath('data.variants.0.preorder_deposit_percent', 100);
 
     $this->getJson('/api/v1/public/products/stocked-phone')
         ->assertOk()
         ->assertJsonPath('data.variants.0.stock_status', 'in_stock')
-        ->assertJsonPath('data.variants.0.preorder_requires_prepayment', null);
+        ->assertJsonPath('data.variants.0.preorder_deposit_percent', null);
 });
 
 test('the prepayment flag round-trips through the variant endpoint', function () {
@@ -638,8 +638,8 @@ test('the prepayment flag round-trips through the variant endpoint', function ()
     $this->withHeader('Authorization', "Bearer {$token}")
         ->patchJson("/api/v1/products/{$product->id}/variants/{$variant->id}", [
             'allow_preorder' => true,
-            'preorder_requires_prepayment' => true,
+            'preorder_deposit_percent' => 100,
         ])
         ->assertOk()
-        ->assertJsonPath('data.preorder_requires_prepayment', true);
+        ->assertJsonPath('data.preorder_deposit_percent', 100);
 });
