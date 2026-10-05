@@ -428,3 +428,55 @@ test('a re-uploaded transfer can then be approved normally', function () {
     expect($invoice->fresh()->status)->toBe('paid')
         ->and($tenant->fresh()->subscription->effectivePlan())->toBe('pro');
 });
+
+/**
+ * The lazy cleanup in ManualBillingRail only runs when the shop COMES BACK.
+ * A shop that clicked "pay by transfer" once and never returned therefore
+ * left its intent pending forever, and the chase list is the one place that
+ * showed it — a list of shops to chase that nobody can ever finish chasing.
+ *
+ * Excluded by date rather than swept by a scheduler, the same position grace
+ * and effectivePlan() take: the dates already say when it went stale. The row
+ * is untouched and still in the ledger, which is where reconciliation looks.
+ */
+test('an abandoned intent drops off the chase list once it goes stale', function () {
+    [$tenant] = makeTenantUser(tenantOverrides: ['currency' => 'THB']);
+    subscribeTenant($tenant, ['plan' => 'starter', 'gateway' => 'manual']);
+
+    $abandoned = createTransferInvoice($tenant, ['proof_path' => null]);
+    $abandoned->forceFill([
+        'created_at' => now()->subDays(config('billing.transfer_intent_expiry_days') + 1),
+    ])->save();
+
+    $platform = actingAsPlatform();
+
+    $platform->getJson('/api/v1/platform/billing/awaiting-transfer')
+        ->assertOk()
+        ->assertJsonCount(0, 'data');
+
+    // Not hidden, and not rewritten — still unpaid, still in the ledger.
+    $platform->getJson('/api/v1/platform/billing/invoices')
+        ->assertOk()
+        ->assertJsonPath('data.0.id', $abandoned->id);
+
+    expect($abandoned->fresh()->status)->toBe('pending');
+});
+
+/**
+ * The boundary matters in both directions: a transfer on this rail genuinely
+ * takes days, so an intent inside the window is still a shop worth chasing.
+ */
+test('an intent inside the expiry window is still on the chase list', function () {
+    [$tenant] = makeTenantUser(tenantOverrides: ['currency' => 'THB']);
+    subscribeTenant($tenant, ['plan' => 'starter', 'gateway' => 'manual']);
+
+    $recent = createTransferInvoice($tenant, ['proof_path' => null]);
+    $recent->forceFill([
+        'created_at' => now()->subDays(max(1, config('billing.transfer_intent_expiry_days') - 1)),
+    ])->save();
+
+    actingAsPlatform()->getJson('/api/v1/platform/billing/awaiting-transfer')
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.id', $recent->id);
+});

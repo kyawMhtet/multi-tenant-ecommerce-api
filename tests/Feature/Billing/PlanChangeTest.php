@@ -326,3 +326,52 @@ test('an approval inside the quoted period honours it unchanged', function () {
     expect($tenant->fresh()->subscription->current_period_ends_at->toDateString())
         ->toBe($quotedEnd->toDateString());
 });
+
+/**
+ * Superseding assumes the screenshot has not arrived yet — "two invoices with
+ * one screenshot between them" — and that assumption inverts once it has.
+ *
+ * A shop that wired the money for Starter, uploaded the proof, and only then
+ * changed its mind to Pro used to have the evidenced invoice voided out of
+ * the review queue: real money, no row any reviewer could see, under a note
+ * saying it chose another plan "before paying", which by then was false.
+ *
+ * It cannot bring back the double-grant either, which is the point of the
+ * second half of this test: a proofless invoice can never enter the review
+ * queue at all, so two periods still cost two screenshots.
+ */
+test('a transfer the shop has already evidenced survives choosing another plan', function () {
+    [$tenant] = thbShop(['plan' => 'starter', 'gateway' => 'manual']);
+
+    $sent = requestTransferForTenant($tenant, 'starter');
+    // The shop transfers the money and uploads its screenshot.
+    $sent->forceFill(['proof_path' => 'billing-proofs/real-transfer.jpg'])->save();
+
+    // ...then changes its mind before anyone has ruled on it.
+    $second = requestTransferForTenant($tenant, 'pro');
+
+    expect($sent->fresh()->status)->toBe('pending')
+        ->and($sent->fresh()->note)->toBeNull();
+
+    $queue = SubscriptionInvoice::withoutGlobalScope(TenantScope::class)
+        ->awaitingApproval()->pluck('id')->all();
+    $chase = SubscriptionInvoice::withoutGlobalScope(TenantScope::class)
+        ->awaitingTransfer()->pluck('id')->all();
+
+    // The money that moved is in front of a human; the fresh intent is not.
+    expect($queue)->toBe([$sent->id])
+        ->and($chase)->toBe([$second->id]);
+});
+
+/**
+ * The carve-out above is only for an evidenced invoice. One the shop never
+ * paid against is still superseded, or it would owe two months.
+ */
+test('an unclaimed intent is still voided when the shop changes plan', function () {
+    [$tenant] = thbShop(['plan' => 'starter', 'gateway' => 'manual']);
+
+    $first = requestTransferForTenant($tenant, 'starter');
+    requestTransferForTenant($tenant, 'pro');
+
+    expect($first->fresh()->status)->toBe('void');
+});

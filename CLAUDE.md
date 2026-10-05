@@ -386,10 +386,15 @@ sharing one catalog/inventory/order backend per tenant.
 - **Only platform staff may set it** (`POST /platform/subscriptions/{id}/billing-currency`).
   Left to the shop it would be an arbitrage lever rather than a preference — the ladders are not
   at parity (Pro is 699 THB against 89,000 MMK, roughly 636 THB) and the gap moves with FX.
-  Changing it VOIDS pending transfer invoices rather than converting them: a pending invoice
+  Changing it VOIDS UNCLAIMED transfer intents rather than converting them: a pending invoice
   carries an amount and bank details the shop was told to use, and reinterpreting either would
-  put a figure in front of a reviewer that nobody asked the shop to pay. Paid invoices are never
-  touched — their currency is snapshotted and records money that actually moved.
+  put a figure in front of a reviewer that nobody asked the shop to pay. An invoice carrying a
+  SCREENSHOT survives the switch, in its original currency — that money was already wired to the
+  old account, and voiding it dropped it out of the review queue where no human would see it
+  again. Because such an invoice now outlives a switch, `ManualBillingRail`'s reuse guard matches
+  on plan AND currency: plan alone would hand the surviving old-currency invoice back to a shop
+  now billed in another. Paid invoices are never touched at all — their currency is snapshotted
+  and records money that actually moved.
 - The original single platform-wide currency (THB, since the platform's Stripe account is Thai)
   was wrong for a different reason worth remembering: a shop inside Myanmar cannot easily wire
   Baht to a Thai bank (capital controls, not inconvenience), so a Baht-only bill broke the manual
@@ -573,9 +578,14 @@ sharing one catalog/inventory/order backend per tenant.
   - `/billing/pending` — the review QUEUE. Proof-carrying invoices ONLY: what a human must rule
     on. It used to include proofless ones too, which made it answer two questions at once and had
     to be visually filtered before it could be worked.
-  - `/billing/awaiting-transfer` — shops that asked how to pay and sent nothing. A chase list;
-    nothing here is actionable. NOT hidden, because a shop that transfers and forgets to upload is
-    common on this rail and the money needs an invoice to land against.
+  - `/billing/awaiting-transfer` — shops that asked how to pay and sent nothing *recently*. A
+    chase list; nothing here is actionable. NOT hidden, because a shop that transfers and forgets
+    to upload is common on this rail and the money needs an invoice to land against. Stale intents
+    are EXCLUDED by date (`scopeAwaitingTransfer` is the exact complement of `scopeStaleIntent`):
+    the lazy void only fires when the shop comes back, so a shop that clicked once and never
+    returned used to sit here forever, and nobody chases a year-old click. Derived, not swept —
+    no scheduler, same position as grace and `effectivePlan()`. The row is untouched and still in
+    the ledger, which is where reconciliation looks.
   - `/billing/invoices` — the ledger, all statuses, newest first, for reconciliation.
 - Raising an invoice at "pay by transfer" is unavoidable and not a false record: the invoice is
   what carries the `SUB-nn` reference the shop quotes in the transfer note, so it must exist
@@ -623,9 +633,18 @@ sharing one catalog/inventory/order backend per tenant.
 - **`POST /billing/subscribe` never changes the plan, the status or `gateway`.** A redirect can be
   closed and a bank transfer may never be sent. Same rule as orders: only confirmed money moves
   state — a webhook on the card rail, a human on the manual one.
-- Asking to pay by transfer twice REUSES the unpaid invoice rather than raising a second one.
-  Asking for a DIFFERENT plan voids the earlier pending one — otherwise a shop that changed its
-  mind owes two invoices with one screenshot between them, and approving both grants two periods.
+- Asking to pay by transfer twice REUSES the unpaid invoice for the same plan AND currency rather
+  than raising a second one. Asking for a DIFFERENT plan voids the earlier UNCLAIMED one —
+  otherwise a shop that changed its mind owes two invoices with one screenshot between them, and
+  approving both grants two periods. **An invoice carrying a screenshot is never voided**, by
+  either that path or a currency change: `SubscriptionInvoice::scopeUnclaimedIntent()` is the one
+  predicate both void sites go through, and it requires `proof_path` to be null. The
+  "one screenshot between them" reasoning assumes the screenshot hasn't arrived, and inverts once
+  it has — a shop that wired the money, uploaded proof, then switched plan had the evidenced
+  invoice voided out of `scopeAwaitingApproval()`, leaving real money with no row any reviewer
+  could see, under a note saying it chose another plan "before paying". It cannot reintroduce the
+  double-grant: a proofless invoice can never enter the review queue at all, so two periods still
+  cost two screenshots, which is two transfers.
 - **The three plan-change cases diverge deliberately**, keyed on `PlanCatalog::rank()` (declaration
   order in `PLANS` is the ladder, not price — prices are per currency and could cross over):
   - **Renew** (same plan): period starts at `current_period_ends_at`, so paying early extends

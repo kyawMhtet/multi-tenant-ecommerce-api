@@ -137,14 +137,27 @@ class SubscriptionService
      * history, and scopeUnpaid() excludes 'void', so a voided invoice can
      * never be reused or approved.
      *
-     * Only PENDING ones, and only this subscription's — a paid invoice is a
-     * record of money that actually moved and is never touched.
+     * UNCLAIMED intents only — the carve-out that makes this safe. The
+     * reasoning above assumes the screenshot has not arrived yet ("with one
+     * screenshot between them"), and inverts completely once it has: a shop
+     * that wired the money for Starter, uploaded the proof, and only then
+     * changed its mind to Pro would have had the evidenced invoice voided out
+     * of scopeAwaitingApproval(), leaving real money with no row any reviewer
+     * could see — under a note saying it chose another plan "before paying",
+     * which by then was false. An evidenced invoice therefore stays pending
+     * and stays in the queue for a human to rule on.
+     *
+     * That cannot reintroduce the double-grant this guards against: a
+     * proofless invoice can never enter the review queue at all, so approving
+     * two periods still takes two screenshots, which is two transfers.
+     *
+     * Only this subscription's, and never a paid one — that is a record of
+     * money that actually moved.
      */
     private function supersedePendingInvoicesForOtherPlans(Subscription $subscription, string $plan): void
     {
         $subscription->invoices()
-            ->where('status', 'pending')
-            ->where('gateway', 'manual')
+            ->unclaimedIntent()
             ->where('plan', '!=', $plan)
             ->update([
                 'status' => 'void',

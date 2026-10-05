@@ -69,11 +69,20 @@ class ManualBillingRail implements BillingRail
     }
 
     /**
-     * Reuses an existing unpaid invoice for the same plan rather than raising
-     * a second one. A shop owner clicking "pay by transfer" twice, or coming
-     * back tomorrow to re-read the bank details, must not end up owing two
-     * months — and a human reviewing the queue should not have to work out
-     * which of three identical invoices the screenshot belongs to.
+     * Reuses an existing unpaid invoice for the same plan AND the same
+     * currency rather than raising a second one. A shop owner clicking "pay
+     * by transfer" twice, or coming back tomorrow to re-read the bank
+     * details, must not end up owing two months — and a human reviewing the
+     * queue should not have to work out which of three identical invoices the
+     * screenshot belongs to.
+     *
+     * Currency is part of the match because an invoice can now outlive a
+     * change of billing currency: SubscriptionReviewService voids the
+     * unclaimed intents when staff switch a shop, but deliberately leaves one
+     * carrying a screenshot alone, since it records money already wired to
+     * the old account. Matching on plan alone would hand that surviving
+     * invoice back to a shop now billed in another currency, quoting an
+     * amount and a bank account nobody would ask it for today.
      */
     private function pendingInvoice(Subscription $subscription, string $plan, string $currency): SubscriptionInvoice
     {
@@ -95,6 +104,7 @@ class ManualBillingRail implements BillingRail
             ->unpaid()
             ->where('gateway', 'manual')
             ->where('plan', $plan)
+            ->where('currency', $currency)
             ->latest('id')
             ->first();
 

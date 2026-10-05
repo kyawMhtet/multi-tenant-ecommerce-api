@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Carbon;
 
 /**
  * One billing period's charge. History, not state — Subscription answers
@@ -82,29 +83,64 @@ class SubscriptionInvoice extends Model
     }
 
     /**
-     * The shop asked for bank details and has sent nothing yet.
+     * A transfer that was asked for and that nobody has yet claimed to have
+     * paid: pending, manual, no screenshot.
+     *
+     * The predicate behind the chase list and the expiry rule — and, more
+     * importantly, the ONLY thing anything may void. An invoice carrying a
+     * screenshot is a claim on money that has already left a shop's bank
+     * account; voiding one drops it out of scopeAwaitingApproval(), where it
+     * becomes invisible to every reviewer while the money stays gone. Both
+     * places that void invoices (a shop changing plan, staff changing billing
+     * currency) go through this scope so neither can reach an evidenced one.
+     */
+    public function scopeUnclaimedIntent(Builder $query): Builder
+    {
+        return $query->where('status', 'pending')
+            ->where('gateway', 'manual')
+            ->whereNull('proof_path');
+    }
+
+    /**
+     * The boundary between an intent still worth chasing and a dead one.
+     * Shared so the two sides can never overlap or leave a gap between them.
+     */
+    private static function intentExpiryCutoff(): Carbon
+    {
+        return now()->subDays((int) config('billing.transfer_intent_expiry_days'));
+    }
+
+    /**
+     * The shop asked for bank details, has sent nothing yet, and asked
+     * recently enough that chasing it still makes sense.
      *
      * Deliberately NOT part of the review queue: there is nothing for a human
      * to decide here. It is a list to chase or ignore, and mixing the two made
      * the queue mean two different things at once.
+     *
+     * Stale intents are EXCLUDED rather than swept. They are voided lazily,
+     * when the shop next asks to pay (ManualBillingRail), so a shop that
+     * clicked once and never came back would otherwise sit on this list
+     * forever — and nobody is going to chase a year-old click. Derived from
+     * the dates rather than written by a scheduler, the same position grace
+     * and effectivePlan() take. Nothing is hidden: a stale intent is still in
+     * the full ledger, which is where reconciliation looks.
      */
     public function scopeAwaitingTransfer(Builder $query): Builder
     {
-        return $query->where('status', 'pending')
-            ->where('gateway', 'manual')
-            ->whereNull('proof_path')
+        return $query->unclaimedIntent()
+            ->where('created_at', '>=', self::intentExpiryCutoff())
             ->orderBy('created_at');
     }
 
     /**
      * Asked for, never sent, and old enough that the period it quotes has
      * stopped being meaningful. Reusing one would bill the shop for a month
-     * that has already passed.
+     * that has already passed. The exact complement of scopeAwaitingTransfer().
      */
     public function scopeStaleIntent(Builder $query): Builder
     {
-        return $query->awaitingTransfer()->where(
-            'created_at', '<', now()->subDays((int) config('billing.transfer_intent_expiry_days'))
-        );
+        return $query->unclaimedIntent()
+            ->where('created_at', '<', self::intentExpiryCutoff());
     }
 }

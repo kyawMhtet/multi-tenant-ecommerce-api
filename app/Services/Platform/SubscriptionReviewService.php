@@ -169,11 +169,17 @@ class SubscriptionReviewService
      * Passing null RESTORES the default of following the shop's selling
      * currency, rather than being a way to unset billing.
      *
-     * Pending transfer invoices are voided, not converted: they carry an
+     * Unclaimed transfer intents are voided, not converted: they carry an
      * amount and a set of bank details the shop was told to use, and silently
      * reinterpreting either would put a figure in front of a reviewer that
-     * nobody ever asked the shop to pay. Paid invoices are never touched —
-     * their currency is snapshotted, and it records money that actually moved.
+     * nobody ever asked the shop to pay.
+     *
+     * An invoice carrying a SCREENSHOT survives, for the same reason a paid
+     * one does: the shop has already wired that amount into that account, and
+     * voiding it would drop money that genuinely moved out of the review
+     * queue entirely. It stays pending in its original currency for a human
+     * to rule on, and approving it records what actually arrived. Paid
+     * invoices are never touched at all — their currency is snapshotted.
      */
     public function setBillingCurrency(int $subscriptionId, ?string $currency): Subscription
     {
@@ -200,8 +206,7 @@ class SubscriptionReviewService
             }
 
             $subscription->invoices()
-                ->where('status', 'pending')
-                ->where('gateway', 'manual')
+                ->unclaimedIntent()
                 ->update([
                     'status' => 'void',
                     'note' => 'Superseded — the billing currency for this shop changed.',

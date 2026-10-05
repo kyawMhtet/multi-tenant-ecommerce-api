@@ -176,3 +176,52 @@ test('a shop cannot choose its own billing currency', function () {
     expect($tenant->fresh()->currency)->toBe('MMK')
         ->and($tenant->fresh()->subscription->billing_currency)->toBeNull();
 });
+
+/**
+ * Voiding a pending transfer on a currency change is right for an intent
+ * nobody has paid against — but an invoice carrying a screenshot records
+ * money already wired to the OLD account, in the OLD currency. Voiding that
+ * dropped it out of the review queue, so the transfer the shop actually made
+ * could never be ruled on.
+ */
+test('changing the currency leaves an evidenced transfer for a human to rule on', function () {
+    $tenant = shopSellingIn('MMK');
+    $sent = requestTransferForTenant($tenant, 'pro');
+    $sent->forceFill(['proof_path' => 'billing-proofs/wired-in-mmk.jpg'])->save();
+
+    actingAsPlatform()
+        ->postJson("/api/v1/platform/subscriptions/{$tenant->subscription->id}/billing-currency", [
+            'currency' => 'THB',
+        ])->assertOk();
+
+    $after = SubscriptionInvoice::withoutGlobalScope(TenantScope::class)->find($sent->id);
+
+    // Still pending, still in its original currency — that is what arrived.
+    expect($after->status)->toBe('pending')
+        ->and($after->currency)->toBe('MMK')
+        ->and(SubscriptionInvoice::withoutGlobalScope(TenantScope::class)
+            ->awaitingApproval()->pluck('id')->all())->toBe([$sent->id]);
+});
+
+/**
+ * ...and because that invoice now outlives the switch, the reuse guard has to
+ * match on currency too. Matching on plan alone would hand the surviving MMK
+ * invoice back to a shop now billed in Baht, quoting an amount and a bank
+ * account nobody would ask it for today.
+ */
+test('a surviving invoice in the old currency is not reused after the switch', function () {
+    $tenant = shopSellingIn('MMK');
+    $sent = requestTransferForTenant($tenant, 'pro');
+    $sent->forceFill(['proof_path' => 'billing-proofs/wired-in-mmk.jpg'])->save();
+
+    actingAsPlatform()
+        ->postJson("/api/v1/platform/subscriptions/{$tenant->subscription->id}/billing-currency", [
+            'currency' => 'THB',
+        ])->assertOk();
+
+    $next = requestTransferForTenant($tenant->fresh(), 'pro');
+
+    expect($next->id)->not->toBe($sent->id)
+        ->and($next->currency)->toBe('THB')
+        ->and((float) $next->amount)->toBe(699.0);
+});

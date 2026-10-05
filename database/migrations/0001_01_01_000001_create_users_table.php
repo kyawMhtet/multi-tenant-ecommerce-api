@@ -18,7 +18,6 @@ return new class extends Migration
             $table->string('name');
             // Globally unique, NOT per-tenant. AuthService's login lookup
             // is global across all tenants and is only safe because of
-            // this constraint — see CLAUDE.md before ever relaxing it.
             $table->string('email')->unique();
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');
